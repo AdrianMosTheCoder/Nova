@@ -410,240 +410,165 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Nova</title>
 <style>
+*{box-sizing:border-box}
 :root{color-scheme:dark}
-body{background:#101820;color:#d8e2ec;font:14px/1.6 ui-monospace,Menlo,monospace;
-max-width:840px;margin:36px auto;padding:0 16px}
-h1{font-size:17px;margin:0 0 3px}
-.sub{color:#6d8296;font-size:12px;margin:0 0 18px}
-.panel{border:1px solid #24323f;border-radius:3px;padding:14px;margin-bottom:18px;
-background:#0c141c}
-.stats{display:flex;gap:20px;flex-wrap:wrap;font-size:12px}
-.stat b{display:block;font-size:16px;color:#7fd1a8;font-weight:600}
-.stat span{color:#6d8296}
-#spark{width:100%;height:54px;margin-top:12px}
-textarea{width:100%;height:170px;background:#0a121a;color:#d8e2ec;border:1px solid #24323f;
-padding:12px;font:inherit;border-radius:3px;resize:vertical}
-.row{display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap}
-label{font-size:12px;color:#6d8296}
-input[type=range]{width:100px;vertical-align:middle}
-button,a.btn{background:#2f7d76;color:#eefbf8;border:0;padding:9px 15px;border-radius:3px;
-font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
-.ghost{background:none;border:1px solid #24323f;color:#6d8296}
-#go{margin-left:auto}
-pre{background:#0a121a;border:1px solid #24323f;border-left:3px solid #2f7d76;padding:14px;
-white-space:pre-wrap;border-radius:3px;margin-top:16px}
-.new{color:#7fd1a8}
-.note{color:#c2915a;font-size:12px}
+body{background:#0d141b;color:#dbe4ee;font:15px/1.6 ui-monospace,Menlo,monospace;
+margin:0;height:100vh;display:flex;flex-direction:column}
+header{border-bottom:1px solid #1e2a36;padding:12px 18px;display:flex;gap:12px;
+align-items:center;flex-wrap:wrap;background:#0b1118}
+header h1{font-size:15px;margin:0;letter-spacing:.04em}
+header .tag{color:#6d8296;font-size:11px}
+select,input,textarea,button{font:inherit;border-radius:6px}
+select,#acct{background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:6px 8px}
+#acct{width:104px}
+#feed{flex:1;overflow-y:auto;padding:22px 18px;display:flex;flex-direction:column;gap:18px}
+.turn{display:flex;gap:11px;max-width:760px;width:100%;margin:0 auto}
+.who{width:26px;height:26px;border-radius:6px;flex:none;display:flex;
+align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.you .who{background:#2b3a49;color:#9fb3c8}
+.bot .who{background:#1d5c56;color:#a8ede4}
+.body{flex:1;min-width:0}
+.name{font-size:11px;color:#6d8296;margin-bottom:3px}
+.text{white-space:pre-wrap;word-wrap:break-word}
+.card{background:#0a1017;border:1px solid #1e2a36;border-radius:8px;padding:12px 14px;
+margin-top:9px;overflow-x:auto}
+.card pre{margin:0;font-size:13px;white-space:pre}
+.out{border-left:3px solid #3fae8f;background:#0a1017;padding:10px 12px;margin-top:8px;
+border-radius:6px;font-size:13px;white-space:pre-wrap}
+.err{border-left-color:#c7566d}
+.tools{display:flex;gap:8px;margin-top:8px}
+.tools button{background:#16212c;color:#9fb3c8;border:1px solid #24323f;padding:5px 11px;
+cursor:pointer;font-size:12px}
+.tools button:hover{border-color:#3fae8f;color:#cfe9e2}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.chips button{background:none;border:1px dashed #2b3a49;color:#7d93a8;padding:7px 12px;
+cursor:pointer;font-size:12.5px}
+.chips button:hover{border-color:#3fae8f;color:#cfe9e2}
+a{color:#6fd3c0}
+.link{display:block;margin-top:8px;font-size:13px}
+.link span{color:#6d8296;display:block;font-size:12px}
+audio{width:100%;margin-top:10px}
+.dots span{animation:b 1.2s infinite;display:inline-block}
+.dots span:nth-child(2){animation-delay:.2s}
+.dots span:nth-child(3){animation-delay:.4s}
+@keyframes b{0%,60%,100%{opacity:.25}30%{opacity:1}}
+footer{border-top:1px solid #1e2a36;padding:12px 18px;background:#0b1118}
+.bar{max-width:760px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+#msg{flex:1;background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:11px 13px;
+resize:none;height:46px;max-height:150px}
+#send{background:#2f7d76;color:#eefbf8;border:0;padding:12px 18px;cursor:pointer}
+#send:disabled{background:#1b2a33;color:#5b7186;cursor:default}
+.hint{max-width:760px;margin:7px auto 0;color:#55697c;font-size:11px}
 </style>
-<h1>Nova <span id="mname" style="color:#6d8296;font-size:12px">1.7</span></h1>
-<p class="sub">One file. Rio makes music, Milo does words.</p>
-<div class="panel">
-<div class="row" style="margin-top:0">
-<select id="model" style="background:#0a121a;color:#d8e2ec;border:1px solid #24323f;
-padding:8px;border-radius:3px;font:inherit"></select>
-<input id="acct" placeholder="account" style="width:110px;background:#0a121a;
-color:#d8e2ec;border:1px solid #24323f;padding:8px;border-radius:3px;font:inherit">
-<span class="note" id="mblurb"></span>
-</div>
-<div id="log" style="margin:12px 0;max-height:340px;overflow-y:auto"></div>
-<div class="row" style="margin-top:0">
-<input id="msg" placeholder="make me a funk beat at 140 bpm"
-style="flex:1;min-width:200px;background:#0a121a;color:#d8e2ec;border:1px solid #24323f;
-padding:10px;font:inherit;border-radius:3px">
-<button id="send">Send</button>
-</div>
-</div>
-<div class="panel">
-<div class="stats">
-<div class="stat"><b id="s-step">–</b><span>steps</span></div>
-<div class="stat"><b id="s-loss">–</b><span>val loss</span></div>
-<div class="stat"><b id="s-best">–</b><span>best</span></div>
-<div class="stat"><b id="s-params">–</b><span>params</span></div>
-<div class="stat"><b id="s-mem">–</b><span>memory</span></div>
-<div class="stat"><b id="s-status">–</b><span>status</span></div>
-</div>
-<svg id="spark" viewBox="0 0 400 54" preserveAspectRatio="none"></svg>
-<div class="row">
-<button class="ghost" id="pause">Pause training</button>
-<a class="btn ghost" href="/export">Download weights</a>
-<span class="note" id="note"></span>
-</div>
-</div>
-<textarea id="p" placeholder="def evaluate_board(board):"></textarea>
-<div class="row">
-<label>length <input type="range" id="t" min="30" max="300" value="120"></label>
-<label>temp <input type="range" id="temp" min="1" max="15" value="7"></label>
-<button id="go">Continue</button>
-</div>
-<pre id="out">Below about 1.5 val loss it starts producing
-real-looking code. Watch the curve.</pre>
 
-<div id="results" style="margin-top:12px;font-size:12.5px"></div>
-</div>
+<header>
+  <h1>Nova</h1>
+  <span class="tag" id="blurb"></span>
+  <span style="flex:1"></span>
+  <select id="model"></select>
+  <input id="acct" placeholder="account">
+</header>
+
+<div id="feed"></div>
+
+<footer>
+  <div class="bar">
+    <textarea id="msg" placeholder="Ask for a beat, some code, or a search..."></textarea>
+    <button id="send">Send</button>
+  </div>
+  <div class="hint">Enter sends, Shift+Enter for a new line. Rio makes music,
+  Milo does words.</div>
+</footer>
+
 <script>
 const $=id=>document.getElementById(id);
-let paused=false;
-function draw(h){
-const svg=$('spark');
-svg.innerHTML='';
-if (h.length<2) return;
-const ys=h.map(p=>p[1]),lo=Math.min(...ys),hi=Math.max(...ys),span=(hi - lo) || 1;
-const pts=h.map((p,i)=>`${
-(i/(h.length-1)*400).toFixed(1)},`+`${
-(50-((p[1]-lo)/span)*46).toFixed(1)}`).join(' ');
-const l=document.createElementNS('http://www.w3.org/2000/svg','polyline');
-l.setAttribute('points',pts);
-l.setAttribute('fill','none');
-l.setAttribute('stroke','#2f7d76');
-l.setAttribute('stroke-width','1.5');
-svg.appendChild(l);
-}async function poll(){
-try{
-const s=await (await fetch('/status')).json();
-$('s-step').textContent=s.step.toLocaleString();
-$('s-loss').textContent=s.val_loss ?? '–';
-$('s-best').textContent=s.best_val ?? '–';
-$('s-params').textContent=(s.params/1000).toFixed(0)+'K';
-$('s-mem').textContent=s.mem_mb+' MB';
-$('s-status').textContent=s.status;
-$('note').textContent=s.note || '';
-if (s.music){
-$('m-step').textContent=s.music.step.toLocaleString();
-$('m-loss').textContent=s.music.loss ?? '–';
-$('m-style').textContent=s.music.style;
-}draw(s.history);
-}catch (e){
-}}poll();
-setInterval(poll,4000);
-$('pause').onclick=async ()=>{
-paused=!paused;
-await fetch(paused ? '/pause':'/resume',{
-method:'POST'});
-$('pause').textContent=paused ? 'Resume training':'Pause training';
-poll();
-};
-const log=$('log'),msg=$('msg');
-function bb(who,text,cls){
+const feed=$('feed'),msg=$('msg');
+let busy=false;
+
+function turn(who,name){
 const d=document.createElement('div');
-d.style.margin='9px 0';
-const col=who==='you' ? '#c2915a':'#7fd1a8';
-d.innerHTML=`<span style="color:${
-col};
-font-size:11px">${
-who}</span>`;
-const p=document.createElement('div');
-p.style.whiteSpace='pre-wrap';
-if (cls){
-p.style.background='#0a121a';
-p.style.border='1px solid #24323f';
-p.style.padding='10px';
-p.style.borderRadius='3px';
-p.style.marginTop='4px';
-}p.textContent=text;
-d.appendChild(p);
-log.appendChild(d);
-log.scrollTop=log.scrollHeight;
-return d;
-}async function lm(){
-const d=await (await fetch('/models')).json();
+d.className='turn '+(who==='you'?'you':'bot');
+d.innerHTML='<div class="who">'+(who==='you'?'YOU':'N')+'</div>'+
+'<div class="body"><div class="name">'+name+'</div></div>';
+feed.appendChild(d);feed.scrollTop=feed.scrollHeight;
+return d.querySelector('.body');
+}
+function say(body,text,cls){
+const p=document.createElement('div');p.className=cls||'text';p.textContent=text;
+body.appendChild(p);feed.scrollTop=feed.scrollHeight;return p;
+}
+function chips(body,items){
+const c=document.createElement('div');c.className='chips';
+items.forEach(t=>{const b=document.createElement('button');b.textContent=t;
+b.onclick=()=>{msg.value=t;send();};c.appendChild(b);});
+body.appendChild(c);
+}
+
+async function boot(){
+const d=await(await fetch('/models')).json();
 const sel=$('model');
-for (const [id,m] of Object.entries(d.models)){
-const o=document.createElement('option');
-o.value=id;
-o.textContent=m.name;
-if (id===d.default) o.selected=true;
-sel.appendChild(o);
-}const upd=()=>{
-$('mblurb').textContent=d.models[sel.value].blurb;
-$('mname').textContent=d.models[sel.value].name;
-};
-sel.onchange=upd;
-upd();
-}lm();
+for(const[id,m]of Object.entries(d.models)){
+const o=document.createElement('option');o.value=id;o.textContent=m.name;
+if(id===d.default)o.selected=true;sel.appendChild(o);}
+const upd=()=>{$('blurb').textContent=d.models[sel.value].blurb;};
+sel.onchange=upd;upd();
+const b=turn('bot','Nova');
+say(b,"Pick a model up top, then ask me something. Try one of these:");
+chips(b,['make a funk beat at 130 bpm','write a fibonacci function',
+'explain that','search for baile funk']);
+}
+boot();
+
 async function send(){
-const text=msg.value.trim();
-if (!text) return;
-bb('you',text);
-msg.value='';
-const th=bb('milo','…');
+const text=msg.value.trim();if(!text||busy)return;
+busy=true;$('send').disabled=true;msg.value='';
+say(turn('you','you'),text);
+const wait=turn('bot','Nova');
+const dots=say(wait,'');dots.className='dots';
+dots.innerHTML='<span>.</span><span>.</span><span>.</span>';
 try{
-const ch=$('model').value;
-const r=await (await fetch('/chat',{
-method:'POST',headers:{
-'Content-Type':'application/json'},body:JSON.stringify({
-message:text,model:ch})})).json();
-th.remove();
-bb('milo',r.reply);
-if (r.code) {
-bb('milo',r.code,true);
-const rb=document.createElement('button');
-rb.textContent='Run it';
-rb.style.cssText='margin:6px 0';
-const ob=document.createElement('pre');
-ob.style.cssText='display:none;border-left:3px solid #7fd1a8;margin-top:6px';
-rb.onclick=async()=>{
-rb.disabled=true;rb.textContent='running...';
+const r=await(await fetch('/chat',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({message:text,model:$('model').value,
+account:$('acct').value,session:'web'})})).json();
+dots.remove();
+say(wait,r.reply);
+if(r.code){
+const c=document.createElement('div');c.className='card';
+const pre=document.createElement('pre');pre.textContent=r.code;c.appendChild(pre);
+wait.appendChild(c);
+const t=document.createElement('div');t.className='tools';
+const run=document.createElement('button');run.textContent='Run it';
+const cp=document.createElement('button');cp.textContent='Copy';
+cp.onclick=()=>{navigator.clipboard.writeText(r.code);cp.textContent='Copied';};
+run.onclick=async()=>{
+run.disabled=true;run.textContent='running...';
 try{
 const d=await(await fetch('/run',{method:'POST',
-headers:{'Content-Type':'application/json'},body:JSON.stringify({session:'web'})})).json();
-ob.style.display='block';
-ob.textContent=d.error?('error: '+d.error):(d.output||'(ran, printed nothing)');
-ob.style.borderLeftColor=d.error?'#c7305a':'#7fd1a8';
-}catch(e){ob.style.display='block';ob.textContent='failed: '+e.message;}
-rb.disabled=false;rb.textContent='Run it again';};
-log.appendChild(rb);log.appendChild(ob);log.scrollTop=log.scrollHeight;}
-if (r.audio){
-const a=document.createElement('audio');
-a.controls=true;
-a.src=r.audio;
-a.style.width='100%';
-a.style.marginTop='6px';
-log.appendChild(a);
-a.play().catch(()=>{
-});
-log.scrollTop=log.scrollHeight;
-}if (r.links && r.links.length){
-const d=document.createElement('div');
-d.style.margin='6px 0 0';
-d.innerHTML=r.links.map(l=>`<div style="margin-bottom:7px">`+`<a href="${
-l.url}" target="_blank" style="color:#7fd1a8">${
-l.title}</a><br>`+`<span style="color:#6d8296;font-size:12px">${
-l.snippet||''}</span></div>`).join('');
-log.appendChild(d);
-log.scrollTop=log.scrollHeight;
-}}catch (e){
-th.remove();
-bb('milo','Failed:'+e.message);
-}}$('send').onclick=send;
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({session:'web'})})).json();
+const o=say(wait,d.error?('error: '+d.error):(d.output||'(ran, printed nothing)'));
+o.className=d.error?'out err':'out';
+}catch(e){say(wait,'failed: '+e.message,'out err');}
+run.disabled=false;run.textContent='Run again';};
+t.appendChild(run);t.appendChild(cp);wait.appendChild(t);
+}
+if(r.audio){const a=document.createElement('audio');a.controls=true;a.src=r.audio;
+wait.appendChild(a);a.play().catch(()=>{});}
+if(r.links&&r.links.length){r.links.forEach(l=>{
+const a=document.createElement('a');a.className='link';a.href=l.url;a.target='_blank';
+a.innerHTML=l.title+'<span>'+(l.snippet||l.url)+'</span>';wait.appendChild(a);});}
+}catch(e){dots.remove();say(wait,'Could not reach Nova: '+e.message,'out err');}
+busy=false;$('send').disabled=false;msg.value='';msg.focus();
+feed.scrollTop=feed.scrollHeight;
+}
+$('send').onclick=send;
 msg.addEventListener('keydown',e=>{
-if (e.key==='Enter') send();});
-const pl=$('pl'),nb=$('notes');
-const rs=$('rs');
-$('t-music').onchange=pt;
-const go=$('go'),out=$('out');
-go.onclick=async ()=>{
-const pr=$('p').value;
-if (!pr.trim()) return;
-go.disabled=true;
-out.textContent='writing…';
-try{
-const r=await fetch('/complete',{
-method:'POST',headers:{
-'Content-Type':'application/json'},body:JSON.stringify({
-pr,tokens:+$('t').value,temp:+$('temp').value/10})});
-const d=await r.json();
-if (d.error) out.textContent=d.error;
-else{
-out.textContent=pr;
-const s=document.createElement('span');
-s.className='new';
-s.textContent=d.text;
-out.appendChild(s);
-}}catch (e){
-out.textContent='Could not reach the model:'+e.message;
-}go.disabled=false;
-};
+if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+msg.addEventListener('input',()=>{msg.style.height='46px';
+msg.style.height=Math.min(msg.scrollHeight,150)+'px';});
 </script>"""
+
 
 # --- milo: chat
 # Routes what you ask to something it can do. No language model writes the
