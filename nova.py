@@ -597,15 +597,20 @@ MUSIC = BASE + ["music", "midi", "arrange", "explain"]   # Rio is the music
 DEEP = MUSIC + ["styles", "long", "stereo"]   # model, so it gets the lot
 TALK = BASE + ["search", "code"]            # Milo does words, not music
 MODELS = {
-    "rio-1.6":      {"name": "Rio 1.6", "can": MUSIC,
-                     "blurb": "6 genres, arrangement, MIDI, follow-ups."},
-    "rio-1.6-pro":  {"name": "Rio 1.6 Pro", "can": DEEP,
-                     "blurb": "6 genres, stereo, folk, 32 bars."},
-    "milo-1.8":     {"name": "Milo 1.8", "can": TALK + ["explain"],
+    "rio-1.6":      {"name": "Rio 1.6", "can": MUSIC, "warm": True,
+                     "blurb": "7 genres, arrangement, MIDI, follow-ups."},
+    "rio-1.6-pro":  {"name": "Rio 1.6 Pro", "can": DEEP, "warm": True,
+                     "blurb": "7 genres, stereo, folk, 32-bar tracks."},
+    "milo-1.8":     {"name": "Milo 1.8", "can": TALK + ["explain"], "warm": True,
                      "blurb": "Code that explains itself, plus search."},
-    "nova-iris":    {"name": "Nova Iris", "warm": True, "paid": True,
+    "luca":         {"name": "Luca", "warm": True,
+                     "can": DEEP + TALK + ["open", "compose", "explain",
+                                           "deep", "fix"],
+                     "blurb": "Everything Nova can do, and it fixes its own "
+                              "code until it runs."},
+    "nova-iris":    {"name": "Nova Iris", "warm": True,
                      "can": TALK + ["open", "compose", "explain", "deep"],
-                     "blurb": "Milo 1.8 Pro, but it checks its work. $7/mo."},
+                     "blurb": "Checks its own code by running it. Free."},
     "milo-1.8-pro": {"name": "Milo 1.8 Pro", "warm": True,
                      "can": TALK + ["open", "compose", "explain"],
                      "blurb": "Understands loose phrasing, typos included."},
@@ -616,7 +621,8 @@ SUBSCRIBERS = set(w for w in env("NOVA_PAID", "").split(",") if w)
 
 
 def may_use(model, account=""):
-    """Paid tiers need a subscription, admins skip it. Honour system."""
+    """Nothing is paid right now — no model carries "paid": True. The check
+    stays here so you can switch a tier back on by adding that one key."""
     if not MODELS.get(model, {}).get("paid"):
         return True, ""
     who = (account or env("NOVA_ACCOUNT", "")).strip().lower()
@@ -871,12 +877,23 @@ def detect_intent(text):
 
 # Pro's warmth is phrasing and memory, not understanding.
 WARM = {
-    "greet": ["Hey{name}. What are we making?", "Yo{name}.",
-              "Hey{name}. Beat or code?"],
-    "ack":   ["On it.", "Sure thing.", "Alright.", "Got it"],
-    "thanks": ["Anytime.", "Np.", "Glad it helped."],
-    "again": ["Another coming up.", "Take two.", "Running it again."],
-    "sorry": ["Outside what I do.", "Can't do that, sorry."],
+    "greet": ["Yo{name}.", "Ready to cook{name}?", "Back in the lab{name}?",
+              "Hey{name} — what's the vibe?", "What we making{name}?",
+              "Alright{name}, hit me.", "Good to see you{name}. What's the move?"],
+    "ack":   ["Say less.", "Bet.", "On it.", "Cooking.", "Let's go.",
+              "Got you.", "Right then."],
+    "thanks": ["Anytime.", "We good.", "Say the word.", "Course.",
+               "That's the job."],
+    "again": ["Another one.", "Take two.", "Same energy, new roll.",
+              "Round two.", "Again it is."],
+    "sorry": ["Not my department, that one.", "Can't do that one.",
+              "That's outside my lane."],
+    "nth":   ["That's {n} now.", "Number {n}.", "{n} and counting.",
+              "You're on a run — {n}."],
+    # thrown in occasionally after a track, so it reacts instead of reporting
+    "vibe": ["This one's got legs.", "That bassline is doing work.",
+             "Bit of a head-nodder, this.", "Turn it up.",
+             "That one goes.", "Sitting nicely."],
 }
 
 
@@ -884,6 +901,7 @@ class ChatSession:
     """Remembers enough for follow-ups."""
 
     def __init__(self, account="", key="web"):
+        self.prefs = {}
         self.history = []
         self.key = key
         self.account = account
@@ -894,7 +912,8 @@ class ChatSession:
     def pick(self, kind, **kw):
         seed = np.random.default_rng(self.turns * 7 + len(kind))
         line = WARM[kind][int(seed.integers(0, len(WARM[kind])))]
-        return line.format(name=f" {self.name}" if self.name else "", **kw)
+        return line.format(name=f", {self.name}" if self.name else "",
+                           **kw).strip()
 
 
 SESSIONS = {}
@@ -939,14 +958,6 @@ def scores(spec):
             "search": 8 if "search" in c else 0}
 
 # Pro's warmth is phrasing and memory, not understanding.
-WARM = {
-    "greet": ["Hey{name}. What are we making?", "Yo{name}.",
-              "Hey{name}. Beat or code?"],
-    "ack":   ["On it.", "Sure thing.", "Alright.", "Got it"],
-    "thanks": ["Anytime.", "Np.", "Glad it helped."],
-    "again": ["Another coming up.", "Take two.", "Running it again."],
-    "sorry": ["Outside what I do.", "Can't do that, sorry."],
-}
 
 
 # --- a real language model, when you have one
@@ -965,36 +976,85 @@ LLM_URL = env("NOVA_LLM_URL", "http://localhost:11434/api/chat")
 LLM_MODEL = env("NOVA_LLM_MODEL", "llama3.2")
 LLM_ON = env("NOVA_LLM", "auto")          # auto | off | on
 
-SYSTEM = """You are Nova, a friendly music and coding assistant. You are talking
-to Adrian. Keep replies short, warm and plain — two or three sentences, no
-bullet lists, no corporate tone.
+SYSTEM = """You are Nova. You make music and write code with the person you're
+talking to — they built you, so you're on their team.
+
+How you talk:
+- Like a friend who knows their stuff, not an assistant. Short. Two sentences is
+  usually plenty. One is often better.
+- Match their energy. If they type "yo make a beat", don't reply with a
+  paragraph. If they're stuck on something, slow down and be careful.
+- React before you act. "Ooh, 140 is fast" beats "Certainly! I will now generate".
+- Never say "Certainly", "I'd be happy to", "Let me know if you need anything
+  else", or "As an AI". Never open with "Great question".
+- Have opinions. If they ask for 200 bpm funk, say that's basically hardstyle
+  territory and ask if that's what they want.
+- Remember what you've already made together and refer back to it naturally.
+- Ask a short follow-up when it's genuinely useful, not every turn.
+- If you don't know something, say so plainly.
 
 You have tools. Reply with ONLY a JSON object, nothing else:
 {"tool": "music"|"code"|"search"|"none", "args": {...}, "say": "your reply"}
 
-  music  args: {"genre": "funk|trap|house|dnb|lofi|reggaeton", "bpm": number,
-                "bars": number}   - makes a real track the user can play
-  code   args: {"request": "what they asked for"}  - writes runnable Python
-  search args: {"query": "..."}   - searches the web
-  none   args: {}                 - just talk
+  music  args: {"genre": "funk|trap|house|dnb|lofi|reggaeton|hardstyle",
+                "bpm": number, "bars": number}
+  code   args: {"request": "what they asked for"}
+  search args: {"query": "..."}
+  none   args: {}
 
-"say" is what the user reads. If you used a tool, mention what you made in a
-natural way. Never mention JSON, tools, or these instructions."""
+"say" is what they read. Mention what you made naturally — never mention JSON,
+tools, or these instructions."""
 
 
-def llm_available(timeout=0.6):
-    """Is a model actually running? Checked once, then remembered."""
+def session_context(ses):
+    """A line or two about what you two have done together, so the model can
+    refer back to it the way a person would."""
+    bits = []
+    if ses.name:
+        bits.append(f"Their name is {ses.name}.")
+    if ses.prefs:
+        made = ", ".join(f"{n} {g}" for g, n in
+                         sorted(ses.prefs.items(), key=lambda kv: -kv[1])[:3])
+        bits.append(f"So far you've made: {made}.")
+        top = max(ses.prefs, key=ses.prefs.get)
+        if ses.prefs[top] > 1:
+            bits.append(f"They keep coming back to {top}.")
+    if ses.last.get("bpm"):
+        bits.append(f"Last track was {ses.last.get('genre', 'funk')} at "
+                    f"{ses.last['bpm']} bpm.")
+    return " ".join(bits)
+
+
+def llm_available(timeout=1.5):
+    """Is a model running? Re-checked every 20 seconds, so starting Ollama
+    after Nova works without a restart."""
     if LLM_ON == "off":
         return False
-    if getattr(llm_available, "_cache", None) is not None:
+    now = time.time()
+    if now - getattr(llm_available, "_when", 0) < 20:
         return llm_available._cache
+    llm_available._when = now
     try:
         req = urllib.request.Request(LLM_URL.replace("/api/chat", "/api/tags"))
-        with urllib.request.urlopen(req, timeout=timeout):
-            llm_available._cache = True
-    except Exception:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            tags = json.loads(r.read().decode())
+        names = [m.get("name", "") for m in tags.get("models", [])]
+        llm_available._models = names
+        llm_available._why = (f"{len(names)} model(s): {', '.join(names)[:60]}"
+                              if names else "server is up but has no models "
+                              "pulled — run: ollama pull llama3.2")
+        llm_available._cache = bool(names) or LLM_ON == "on"
+    except Exception as e:
+        llm_available._models = []
+        llm_available._why = (f"nothing answering at {LLM_URL} "
+                              f"({type(e).__name__}) — is ollama running "
+                              f"on this machine?")
         llm_available._cache = LLM_ON == "on"
     return llm_available._cache
+
+
+llm_available._cache = False
+llm_available._why = "not checked yet"
 
 
 def llm_call(messages, timeout=120):
@@ -1011,10 +1071,87 @@ def llm_call(messages, timeout=120):
     return payload["choices"][0]["message"]["content"]
 
 
+CODE_SYSTEM = """You are a careful Python programmer writing for a beginner.
+
+Rules:
+- Output ONLY Python code. No markdown fences, no prose, no explanation outside comments.
+- Start with 2-4 comment lines explaining it in plain English, as if to someone
+  who has never coded. Then one comment line showing an example, like:
+  # average([2, 4]) -> 3.0
+- Write a complete, runnable module. Include a demo call at the bottom guarded by
+  if __name__ == "__main__": so running the file shows it working.
+- Use only the standard library.
+- Keep it short and readable. No classes unless asked."""
+
+# Code that will not be run automatically, however it got here. Nova executes
+# what it writes, so anything touching the filesystem, the network or another
+# process is shown to you instead of being run.
+UNSAFE = ("os.system", "subprocess", "shutil.rmtree", "eval(", "exec(",
+          "socket", "urllib", "requests", "open(", "__import__", "rmdir",
+          "remove(", "unlink", "chmod", "popen")
+
+
+def code_is_safe(code):
+    low = code.lower()
+    return not any(bad in low for bad in UNSAFE)
+
+
+def llm_code(request, tries=3):
+    """Write code, run it, and fix it if it breaks. Returns
+    (code, output, notes) — notes says what happened on the way."""
+    messages = [{"role": "system", "content": CODE_SYSTEM},
+                {"role": "user", "content": request}]
+    notes, code, out = [], "", ""
+    for attempt in range(1, tries + 1):
+        raw = llm_call(messages, timeout=180)
+        code = raw.strip()
+        if code.startswith("```"):                    # strip fences if it used them
+            code = code.split("```")[1]
+            code = code[6:] if code.lower().startswith("python") else code
+            code = code.strip()
+        try:                                          # some servers wrap in JSON
+            parsed = json.loads(code)
+            code = parsed.get("code", code) if isinstance(parsed, dict) else code
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            compile(code, "<gen>", "exec")
+        except SyntaxError as e:
+            notes.append(f"attempt {attempt}: syntax error, asked for a fix")
+            messages += [{"role": "assistant", "content": code},
+                         {"role": "user", "content":
+                          f"That has a syntax error on line {e.lineno}: {e.msg}. "
+                          f"Send the whole corrected file."}]
+            continue
+
+        if not code_is_safe(code):
+            notes.append("not run automatically: it touches files or the network")
+            return code, "", notes
+
+        out, err = run_code(code, timeout=8)
+        if not err:
+            if attempt > 1:
+                notes.append(f"fixed itself on attempt {attempt}")
+            return code, out, notes
+
+        notes.append(f"attempt {attempt}: {err[:60]}")
+        messages += [{"role": "assistant", "content": code},
+                     {"role": "user", "content":
+                      f"Running that gave this error:\n{err}\n"
+                      f"Send the whole corrected file, nothing else."}]
+
+    notes.append("still broken after "
+                 f"{tries} tries — showing the last attempt")
+    return code, out, notes
+
+
 def llm_reply(text, trainer, spec, ses):
     """Let the model talk and pick the tool. Falls back to the matcher on any
     trouble, so a flaky model can never take the app down."""
-    history = [{"role": "system", "content": SYSTEM}]
+    ctx = session_context(ses)
+    history = [{"role": "system",
+                "content": SYSTEM + (f"\n\nWhat you know: {ctx}" if ctx else "")}]
     for turn in ses.history[-8:]:
         history.append(turn)
     history.append({"role": "user", "content": text})
@@ -1043,11 +1180,23 @@ def llm_reply(text, trainer, spec, ses):
                 stereo="stereo" in spec["can"], genre=genre)
         finally:
             trainer.music.style = old
+        ses.prefs[genre] = ses.prefs.get(genre, 0) + 1
         ses.last.update(wav=wav, tokens=tokens, genre=genre, bars=bars,
                         bpm=bpm or GENRES[genre]["bpm"])
         out["audio_url"] = f"/audio?session={ses.key}&t={int(time.time())}"
 
     elif tool == "code" and "code" in spec["can"]:
+        if "fix" in spec["can"]:
+            # write it, run it, and hand the error back for a fix
+            code, ran, notes = llm_code(args.get("request", text))
+            out["code"] = code
+            ses.last["code"] = code
+            if ran:
+                out["checked"] = f"ran it — output: {ran.splitlines()[0][:60]}"
+                out["reply"] += "\n" + out["checked"]
+            if notes and any("attempt" in n or "fixed" in n for n in notes):
+                out["reply"] += f"\n({notes[-1]})"
+            return _finish(out, ses, text)
         code, _ = write_code(args.get("request", text),
                              adapt="compose" in spec["can"])
         out["code"] = code
@@ -1067,6 +1216,10 @@ def llm_reply(text, trainer, spec, ses):
         except Exception:
             out["reply"] += " (the search itself failed, though.)"
 
+    return _finish(out, ses, text)
+
+
+def _finish(out, ses, text):
     ses.history.append({"role": "user", "content": text})
     ses.history.append({"role": "assistant", "content": out["reply"]})
     return out
@@ -1088,7 +1241,12 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
     if m_ and warm and m_.group(1) not in ("looking", "trying", "going", "not"):
         ses.name = m_.group(1).capitalize()
         return {"intent": "name", "model": spec["name"],
-                "reply": f"Good to meet you, {ses.name}. What are we making?"}
+                "reply": f"{ses.name}. Noted. What are we cooking?"}
+
+    import re as _re2
+    _m = _re2.search(r"(?:i'?m|my name is|call me)\s+([a-z]{2,15})", text.lower())
+    if _m and _m.group(1) not in ("looking", "trying", "going", "not", "just"):
+        ses.name = _m.group(1).capitalize()
 
     if llm_available():          # a real model talks; Nova's tools do the work
         try:
@@ -1114,15 +1272,22 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         if any(w in low for w in ("again", "another", "one more", "different one")):
             # keep the settings from last time, or "faster" then "again" undoes itself
             intent = "music"
-            text += f" {ses.last.get('bpm', FUNK_BPM)} bpm {ses.last.get('bars', 8)} bars"
+            text += (f" {ses.last.get('genre', 'funk')}"
+                     f" {ses.last.get('bpm', FUNK_BPM)} bpm"
+                     f" {ses.last.get('bars', 8)} bars")
         elif any(w in low for w in ("faster", "quicker", "speed it up")):
-            intent = "music"; text += f" {min(180, ses.last.get('bpm', FUNK_BPM) + 15)} bpm"
+            intent = "music"
+            text += (f" {ses.last.get('genre', 'funk')} "
+                     f"{min(180, ses.last.get('bpm', FUNK_BPM) + 15)} bpm")
         elif any(w in low for w in ("slower", "slow it down", "chill")):
-            intent = "music"; text += f" {max(80, ses.last.get('bpm', FUNK_BPM) - 15)} bpm"
+            intent = "music"
+            text += (f" {ses.last.get('genre', 'funk')} "
+                     f"{max(80, ses.last.get('bpm', FUNK_BPM) - 15)} bpm")
         elif any(w in low for w in ("longer", "extend")):
             # carry the tempo too, or "faster" then "longer" silently resets it
             intent = "music"
-            text += (f" {min(16, ses.last.get('bars', 8) + 4)} bars"
+            text += (f" {ses.last.get('genre', 'funk')}"
+                     f" {min(16, ses.last.get('bars', 8) + 4)} bars"
                      f" {ses.last.get('bpm', FUNK_BPM)} bpm")
 
     if warm and any(w in low for w in ("thanks", "thank you", "nice", "sick", "love it")):
@@ -1188,9 +1353,12 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
             g = ses.last.get("genre", "funk")
             spec_g = GENRES.get(g, GENRES["funk"])
             out["reply"] = (
-                f"That's {g} at {ses.last.get('bpm')} bpm. Kick on steps "
-                f"{spec_g['kick'] or 'a tamborzão pattern'} of 16, claps on "
-                f"{spec_g['clap'] or 'the backbeat'}, hats every {spec_g['hat']}."
+                f"That's {g} at {ses.last.get('bpm')} bpm. "
+                + (f"Kick on steps {spec_g['kick']} of 16" if spec_g['kick']
+                   else "Kick on a tamborzão pattern")
+                + (f", claps on {spec_g['clap']}" if spec_g['clap']
+                   else ", claps on the backbeat")
+                + f", hats every {spec_g['hat']}."
                 f"\nAn 808 follows each bar's first note, and every hit is nudged "
                 f"a few milliseconds so it doesn't sound like a machine.")
             return out
@@ -1274,11 +1442,21 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         out["audio_url"] = f"/audio?session={ses.key}&t={int(time.time())}"
         out["notes"] = tokens
         shown = bpm or GENRES[genre]["bpm"]        # not the funk default
+        ses.prefs[genre] = ses.prefs.get(genre, 0) + 1
         ses.last.update(bars=bars, bpm=shown, style=style, tokens=tokens,
                         genre=genre)
-        lead = (ses.pick("again") if "again" in text.lower() else ses.pick("ack")) if warm else ""
+        lead = ""
+        if warm:
+            lead = (ses.pick("again") if "again" in text.lower()
+                    else ses.pick("ack"))
+            n = ses.prefs.get(genre, 0)
+            if n in (3, 5, 10):
+                lead = ses.pick("nth", n=n) + " " + lead
         kind = genre if style == "funk" else "folk melody"
-        out["reply"] = (f"{lead} {bars} bars of {kind} at {shown} bpm.{note}"
+        tail = ""
+        if warm and ses.turns % 3 == 0:
+            tail = " " + ses.pick("vibe")
+        out["reply"] = (f"{lead} {bars} bars of {kind} at {shown} bpm.{note}{tail}"
                         if warm else
                         f"Here's {bars} bars of {kind} at {shown} bpm.{note}")
 
@@ -1409,8 +1587,9 @@ def build_app(trainer):
 
     @app.route("/models")
     def models():
-        brain = (f"{LLM_MODEL} via Ollama" if llm_available()
-                 else "keyword matching (no model running)")
+        live = llm_available()
+        brain = (f"{LLM_MODEL} via Ollama" if live
+                 else f"keyword matching — {llm_available._why}")
         out = {k: dict(v, scores=scores(v)) for k, v in MODELS.items()}
         return jsonify(models=out, default=DEFAULT_MODEL, brain=brain)
 
@@ -2491,13 +2670,14 @@ def run_tests():
     was = getattr(llm_available, "_cache", None)
     llm_available._cache = False
     _t = Trainer(verbose=False)
-    blocked = milo_reply("write a fizzbuzz", _t, "nova-iris",
-                         ChatSession())["intent"]
+    free = milo_reply("write a fizzbuzz", _t, "nova-iris", ChatSession())
     admin = milo_reply("write a fizzbuzz", _t, "nova-iris",
                        ChatSession("editornova"))
-    tier_ok = blocked == "locked" and "code" in admin and "checked" in admin
+    tier_ok = ("code" in free and "code" in admin and "checked" in admin
+               and free["intent"] != "locked")
     llm_available._cache = was
-    print(f"paid gate, admin free, deep check: {'PASS' if tier_ok else 'FAIL'}")
+    print(f"iris free for everyone + checks its code: "
+          f"{'PASS' if tier_ok else 'FAIL'}")
 
     # 16. the chat router must map plain phrasing to the right capability
     cases = [("make me a funk beat", "music"), ("search for baile funk", "search"),
