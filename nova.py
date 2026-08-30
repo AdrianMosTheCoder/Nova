@@ -299,31 +299,17 @@ def rss_mb():
     return round(kb / (1024 if sys.platform.startswith("linux") else 1024 * 1024), 1)
 
 class Trainer:
-    """Background thread trains; a lock shares the weights."""
+    """Holds the models the app serves — now just music, built on first use."""
 
     def __init__(self, paths=None, verbose=False):
         os.makedirs(DATA_DIR, exist_ok=True)
         unpack_embedded()
-        self.lock = threading.Lock()
-        self._stop = threading.Event()
-        self.thread = None
-        self.rng = np.random.default_rng()
-        self.model = None
-        self.targets = set(env("MYCODER_TRAIN", "code,music").split(","))
-        self.state = {"status": "starting", "step": 0, "train_loss": None, "val_loss": None,
-                      "best_val": None, "tokens": 0, "params": 0, "vocab": 0, "history": [],
-                      "note": "", "mem_mb": rss_mb(), "started": time.time(),
-                      "targets": sorted(self.targets), "music": None}
-        self._build(paths or CORPUS, verbose)
-        # Built on first use, not at boot: ~13s on a fast core and far more on
-        # a small shared one, which is long enough to earn a 502.
         self._music = None
         self._music_off = env("MYCODER_MUSIC", "1") != "1"
-
-    def _build(self, paths, verbose):
-        """The code model is gone; the music model builds itself."""
         self.model = None
-        self.state["status"] = "ready"
+        self.thread = None
+        self.state = {"status": "ready", "step": 0, "params": 0, "tokens": 0,
+                      "note": "", "music": None}
 
     @property
     def music(self):
@@ -336,73 +322,25 @@ class Trainer:
                 self.state["note"] = f"music unavailable ({type(e).__name__})"
         return self._music
 
-    def _batch(self, split):
-        ix = self.rng.integers(0, len(split) - BLOCK - 1, BATCH)
-        return (np.stack([split[i:i + BLOCK] for i in ix]),
-                np.stack([split[i + 1:i + 1 + BLOCK] for i in ix]))
-
-    def _val(self, iters=3):
-        return sum(self.model.forward(*self._batch(self.val_ids))[1] for _ in range(iters)) / iters
-
-    def _save(self):
-        tmp = CKPT + ".tmp"                             # numpy writes tmp + ".npz"
-        self.model.save(tmp, extra={"step": self.state["step"], "val": self.state["best_val"]})
-        os.replace(tmp + ".npz", CKPT)                  # atomic: never a half-written file
-
-    def step_once(self):
-        x, y = self._batch(self.train_ids)
-        _, loss, cache = self.model.forward(x, y)
-        self.opt.step(self.model.p, self.model.backward(cache))
-        self.state["step"] += 1
-        self.state["train_loss"] = round(loss, 4)
-        return loss
-
-    def _loop(self):
-        self.state["status"] = "training"
-        next_val, next_save = self.state["step"] + 25, self.state["step"] + SAVE_EVERY
-        while not self._stop.is_set():
-            with self.lock:
-                if "music" in self.targets and self.music is not None:
-                    for _ in range(BURST):
-                        self.music.step_once()
-                    if self.music.state["step"] % (SAVE_EVERY * 5) < BURST:
-                        try:
-                            self.music.save()
-                        except OSError:
-                            pass
-                if "code" not in self.targets or self.model is None:
-                    self.state["mem_mb"] = rss_mb()
-                    self._stop.wait(PAUSE)
-                    continue
-                for _ in range(BURST):
-                    self.step_once()
-                if self.state["step"] >= next_val:
-                    next_val = self.state["step"] + 25
-                    vl = round(self._val(), 4)
-                    self.state["val_loss"] = vl
-                    hist = self.state["history"] + [[self.state["step"], vl]]
-                    self.state["history"] = hist[-80:]
-                    if self.state["best_val"] is None or vl < self.state["best_val"]:
-                        self.state["best_val"] = vl
-                if self.state["step"] >= next_save:
-                    next_save = self.state["step"] + SAVE_EVERY
-                    try:
-                        self._save()
-                    except OSError as e:
-                        self.state["note"] = f"could not save: {e}"
-            self.state["mem_mb"] = rss_mb()
-            self._stop.wait(PAUSE)                      # hand the CPU back to Flask
-
     def start(self):
-        if (self.model is None and self.music is None) or (self.thread and self.thread.is_alive()):
+        """Train the music model in the background, if asked to."""
+        if self.thread and self.thread.is_alive() or self.music is None:
             return
-        self._stop.clear()
-        self.thread = threading.Thread(target=self._loop, daemon=True, name="mycoder-train")
+        self._stop = threading.Event()
+
+        def loop():
+            while not self._stop.is_set():
+                for _ in range(BURST):
+                    self.music.step_once()
+                self._stop.wait(PAUSE)
+
+        self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
 
     def stop(self):
-        self._stop.set()
-        self.state["status"] = "paused"
+        if self.thread:
+            self._stop.set()
+
 
 # --- web app
 
@@ -412,79 +350,119 @@ PAGE = """<!doctype html>
 <style>
 *{box-sizing:border-box}
 :root{color-scheme:dark}
-body{background:#0d141b;color:#dbe4ee;font:15px/1.6 ui-monospace,Menlo,monospace;
-margin:0;height:100vh;display:flex;flex-direction:column}
-header{border-bottom:1px solid #1e2a36;padding:12px 18px;display:flex;gap:12px;
-align-items:center;flex-wrap:wrap;background:#0b1118}
-header h1{font-size:15px;margin:0;letter-spacing:.04em}
-header .tag{color:#6d8296;font-size:11px}
-select,input,textarea,button{font:inherit;border-radius:6px}
-select,#acct{background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:6px 8px}
-#acct{width:104px}
-#feed{flex:1;overflow-y:auto;padding:22px 18px;display:flex;flex-direction:column;gap:18px}
-.turn{display:flex;gap:11px;max-width:760px;width:100%;margin:0 auto}
-.who{width:26px;height:26px;border-radius:6px;flex:none;display:flex;
-align-items:center;justify-content:center;font-size:11px;font-weight:700}
+body{background:#0d141b;color:#dbe4ee;font:15px/1.65 ui-monospace,Menlo,monospace;margin:0;
+height:100vh;display:flex;overflow:hidden}
+aside{width:230px;flex:none;background:#080d13;border-right:1px solid #1a2531;display:flex;
+flex-direction:column;padding:12px}
+aside h1{font-size:14px;margin:4px 6px 12px;letter-spacing:.05em}
+#new{background:#16212c;color:#cfe0ef;border:1px solid #24323f;border-radius:7px;padding:9px;
+cursor:pointer;font:inherit;margin-bottom:12px}
+#new:hover{border-color:#3fae8f}
+#chats{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+.chat{padding:8px 10px;border-radius:6px;cursor:pointer;font-size:12.5px;color:#8ea4b8;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat:hover{background:#111a23}
+.chat.on{background:#16212c;color:#dbe4ee}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+header{border-bottom:1px solid #1a2531;padding:10px 18px;display:flex;gap:10px;
+align-items:center;flex-wrap:wrap}
+select,#acct{background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:6px 8px;
+border-radius:6px;font:inherit}
+#acct{width:100px}
+.tag{color:#63788c;font-size:11px}
+#feed{flex:1;overflow-y:auto;padding:26px 18px}
+.turn{display:flex;gap:12px;max-width:740px;margin:0 auto 22px}
+.who{width:26px;height:26px;border-radius:6px;flex:none;display:flex;align-items:center;
+justify-content:center;font-size:10px;font-weight:700}
 .you .who{background:#2b3a49;color:#9fb3c8}
 .bot .who{background:#1d5c56;color:#a8ede4}
 .body{flex:1;min-width:0}
-.name{font-size:11px;color:#6d8296;margin-bottom:3px}
+.name{font-size:11px;color:#63788c;margin-bottom:4px}
 .text{white-space:pre-wrap;word-wrap:break-word}
-.card{background:#0a1017;border:1px solid #1e2a36;border-radius:8px;padding:12px 14px;
-margin-top:9px;overflow-x:auto}
-.card pre{margin:0;font-size:13px;white-space:pre}
-.out{border-left:3px solid #3fae8f;background:#0a1017;padding:10px 12px;margin-top:8px;
+.text code{background:#111a23;padding:1px 5px;border-radius:4px;font-size:13px}
+.text b{color:#fff}
+.card{background:#080d13;border:1px solid #1a2531;border-radius:9px;margin-top:10px;
+overflow:hidden}
+.card .top{display:flex;justify-content:space-between;padding:7px 12px;
+border-bottom:1px solid #1a2531;font-size:11px;color:#63788c}
+.card pre{margin:0;padding:12px 14px;overflow-x:auto;font-size:13px}
+.out{border-left:3px solid #3fae8f;background:#080d13;padding:10px 12px;margin-top:8px;
 border-radius:6px;font-size:13px;white-space:pre-wrap}
 .err{border-left-color:#c7566d}
-.tools{display:flex;gap:8px;margin-top:8px}
-.tools button{background:#16212c;color:#9fb3c8;border:1px solid #24323f;padding:5px 11px;
-cursor:pointer;font-size:12px}
-.tools button:hover{border-color:#3fae8f;color:#cfe9e2}
-.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-.chips button{background:none;border:1px dashed #2b3a49;color:#7d93a8;padding:7px 12px;
-cursor:pointer;font-size:12.5px}
+.acts{display:flex;gap:7px;margin-top:9px}
+.acts button,.card .top button{background:none;border:1px solid #24323f;color:#8ea4b8;
+padding:4px 10px;border-radius:6px;cursor:pointer;font:inherit;font-size:11.5px}
+.acts button:hover,.card .top button:hover{border-color:#3fae8f;color:#cfe9e2}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.chips button{background:none;border:1px dashed #2b3a49;color:#7d93a8;padding:8px 13px;
+border-radius:8px;cursor:pointer;font:inherit;font-size:12.5px}
 .chips button:hover{border-color:#3fae8f;color:#cfe9e2}
 a{color:#6fd3c0}
-.link{display:block;margin-top:8px;font-size:13px}
-.link span{color:#6d8296;display:block;font-size:12px}
+.link{display:block;margin-top:9px;font-size:13px}
+.link span{color:#63788c;display:block;font-size:12px}
 audio{width:100%;margin-top:10px}
-.dots span{animation:b 1.2s infinite;display:inline-block}
-.dots span:nth-child(2){animation-delay:.2s}
-.dots span:nth-child(3){animation-delay:.4s}
-@keyframes b{0%,60%,100%{opacity:.25}30%{opacity:1}}
-footer{border-top:1px solid #1e2a36;padding:12px 18px;background:#0b1118}
-.bar{max-width:760px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
-#msg{flex:1;background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:11px 13px;
-resize:none;height:46px;max-height:150px}
-#send{background:#2f7d76;color:#eefbf8;border:0;padding:12px 18px;cursor:pointer}
+.cursor{display:inline-block;width:7px;background:#3fae8f;animation:bl .9s infinite}
+@keyframes bl{50%{opacity:0}
+}
+footer{border-top:1px solid #1a2531;padding:14px 18px}
+.bar{max-width:740px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+#msg{flex:1;background:#111a23;color:#dbe4ee;border:1px solid #24323f;padding:12px 14px;
+border-radius:10px;resize:none;height:48px;max-height:160px;font:inherit}
+#msg:focus{outline:none;border-color:#3fae8f}
+#send{background:#2f7d76;color:#eefbf8;border:0;padding:13px 20px;border-radius:10px;
+cursor:pointer;font:inherit}
 #send:disabled{background:#1b2a33;color:#5b7186;cursor:default}
-.hint{max-width:760px;margin:7px auto 0;color:#55697c;font-size:11px}
+.hint{max-width:740px;margin:8px auto 0;color:#4d6175;font-size:11px}
+@media(max-width:700px){aside{display:none}
+}
 </style>
 
-<header>
+<aside>
   <h1>Nova</h1>
-  <span class="tag" id="blurb"></span>
-  <span style="flex:1"></span>
-  <select id="model"></select>
-  <input id="acct" placeholder="account">
-</header>
+  <button id="new">+ New chat</button>
+  <div id="chats"></div>
+  <div class="tag" style="padding:8px 6px">Rio makes music.<br>Milo does words.</div>
+</aside>
 
-<div id="feed"></div>
-
-<footer>
-  <div class="bar">
-    <textarea id="msg" placeholder="Ask for a beat, some code, or a search..."></textarea>
-    <button id="send">Send</button>
-  </div>
-  <div class="hint">Enter sends, Shift+Enter for a new line. Rio makes music,
-  Milo does words.</div>
-</footer>
+<main>
+  <header>
+    <select id="model"></select>
+    <input id="acct" placeholder="account">
+    <span class="tag" id="blurb"></span>
+  </header>
+  <div id="feed"></div>
+  <footer>
+    <div class="bar">
+      <textarea id="msg" placeholder="Ask Nova anything it can do..."></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="hint">Enter sends, Shift+Enter for a new line. Nova matches what
+    you ask against what it can do — it has no language model inside.</div>
+  </footer>
+</main>
 
 <script>
 const $=id=>document.getElementById(id);
 const feed=$('feed'),msg=$('msg');
-let busy=false;
+let chats=[],cur=null,busy=false;
 
+function newChat(){
+const c={id:'c'+Date.now(),title:'New chat',turns:[]};
+chats.unshift(c);cur=c;drawList();drawFeed();return c;
+}
+function drawList(){
+$('chats').innerHTML='';
+chats.forEach(c=>{const d=document.createElement('div');
+d.className='chat'+(c===cur?' on':'');d.textContent=c.title;
+d.onclick=()=>{cur=c;drawList();drawFeed();};$('chats').appendChild(d);});
+}
+function drawFeed(){
+feed.innerHTML='';
+if(!cur.turns.length){welcome();return;}
+cur.turns.forEach(t=>{
+const b=turn(t.who,t.who==='you'?'you':'Nova');
+render(b,t);});
+}
 function turn(who,name){
 const d=document.createElement('div');
 d.className='turn '+(who==='you'?'you':'bot');
@@ -493,15 +471,73 @@ d.innerHTML='<div class="who">'+(who==='you'?'YOU':'N')+'</div>'+
 feed.appendChild(d);feed.scrollTop=feed.scrollHeight;
 return d.querySelector('.body');
 }
-function say(body,text,cls){
-const p=document.createElement('div');p.className=cls||'text';p.textContent=text;
-body.appendChild(p);feed.scrollTop=feed.scrollHeight;return p;
+function fmt(t){
+return t.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+.replace(/\\*\\*(.+?)\\*\\*/g,'<b>$1</b>').replace(/`([^`]+)`/g,'<code>$1</code>');
 }
-function chips(body,items){
+function say(body,text,cls){
+const p=document.createElement('div');p.className=cls||'text';
+p.innerHTML=fmt(text);body.appendChild(p);
+feed.scrollTop=feed.scrollHeight;return p;
+}
+async function reveal(body,text){
+const p=say(body,'');const cur=document.createElement('span');
+cur.className='cursor';cur.textContent=' ';p.appendChild(cur);
+const step=Math.max(1,Math.round(text.length/45));
+for(let i=0;i<=text.length;i+=step){
+p.innerHTML=fmt(text.slice(0,i));p.appendChild(cur);
+feed.scrollTop=feed.scrollHeight;await new Promise(r=>setTimeout(r,12));}
+p.innerHTML=fmt(text);return p;
+}
+function welcome(){
+const b=turn('bot','Nova');
+say(b,"What are we making? Rio does music, Milo does code and search.");
 const c=document.createElement('div');c.className='chips';
-items.forEach(t=>{const b=document.createElement('button');b.textContent=t;
-b.onclick=()=>{msg.value=t;send();};c.appendChild(b);});
-body.appendChild(c);
+['make a funk beat at 130 bpm','write a fibonacci function',
+'make a lofi loop','search for baile funk'].forEach(t=>{
+const x=document.createElement('button');x.textContent=t;
+x.onclick=()=>{msg.value=t;send();};c.appendChild(x);});
+b.appendChild(c);
+}
+function render(b,t){
+if(t.who==='you'){say(b,t.text);return;}
+say(b,t.text);
+if(t.code)codeCard(b,t.code);
+if(t.audio){const a=document.createElement('audio');a.controls=true;a.src=t.audio;
+b.appendChild(a);}
+if(t.midi){const d=document.createElement('a');d.className='link';d.href=t.midi;
+d.download='nova.mid';d.textContent='Download the MIDI';b.appendChild(d);}
+(t.links||[]).forEach(l=>{const a=document.createElement('a');a.className='link';
+a.href=l.url;a.target='_blank';a.innerHTML=fmt(l.title)+'<span>'+
+fmt(l.snippet||l.url)+'</span>';b.appendChild(a);});
+actions(b,t);
+}
+function codeCard(b,code){
+const c=document.createElement('div');c.className='card';
+const top=document.createElement('div');top.className='top';
+top.innerHTML='<span>python</span>';
+const run=document.createElement('button');run.textContent='Run';
+top.appendChild(run);c.appendChild(top);
+const pre=document.createElement('pre');pre.textContent=code;c.appendChild(pre);
+b.appendChild(c);
+run.onclick=async()=>{run.disabled=true;run.textContent='running';
+try{const d=await(await fetch('/run',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({session:cur.id})})).json();
+const o=say(b,d.error?('error: '+d.error):(d.output||'(ran, printed nothing)'));
+o.className=d.error?'out err':'out';}catch(e){say(b,'failed: '+e.message,'out err');}
+run.disabled=false;run.textContent='Run again';};
+}
+function actions(b,t){
+const a=document.createElement('div');a.className='acts';
+const cp=document.createElement('button');cp.textContent='Copy';
+cp.onclick=()=>{navigator.clipboard.writeText(t.code||t.text);
+cp.textContent='Copied';setTimeout(()=>cp.textContent='Copy',1200);};
+const rg=document.createElement('button');rg.textContent='Regenerate';
+rg.onclick=()=>{const last=[...cur.turns].reverse().find(x=>x.who==='you');
+if(last){cur.turns=cur.turns.slice(0,cur.turns.indexOf(t));drawFeed();
+send(last.text);}};
+a.appendChild(cp);a.appendChild(rg);b.appendChild(a);
 }
 
 async function boot(){
@@ -510,64 +546,52 @@ const sel=$('model');
 for(const[id,m]of Object.entries(d.models)){
 const o=document.createElement('option');o.value=id;o.textContent=m.name;
 if(id===d.default)o.selected=true;sel.appendChild(o);}
-const upd=()=>{$('blurb').textContent=d.models[sel.value].blurb;};
-sel.onchange=upd;upd();
-const b=turn('bot','Nova');
-say(b,"Pick a model up top, then ask me something. Try one of these:");
-chips(b,['make a funk beat at 130 bpm','write a fibonacci function',
-'explain that','search for baile funk']);
+const upd=()=>$('blurb').textContent=d.models[sel.value].blurb;
+sel.onchange=upd;upd();newChat();
 }
 boot();
 
-async function send(){
-const text=msg.value.trim();if(!text||busy)return;
-busy=true;$('send').disabled=true;msg.value='';
-say(turn('you','you'),text);
-const wait=turn('bot','Nova');
-const dots=say(wait,'');dots.className='dots';
-dots.innerHTML='<span>.</span><span>.</span><span>.</span>';
+async function send(preset){
+const text=(preset||msg.value).trim();if(!text||busy)return;
+busy=true;$('send').disabled=true;if(!preset)msg.value='';
+msg.style.height='48px';
+if(cur.title==='New chat'){cur.title=text.slice(0,28);drawList();}
+cur.turns.push({who:'you',text});say(turn('you','you'),text);
+const b=turn('bot','Nova');
+const dots=say(b,'...');
 try{
-const r=await(await fetch('/chat',{method:'POST',
+const res=await fetch('/chat',{method:'POST',
 headers:{'Content-Type':'application/json'},
 body:JSON.stringify({message:text,model:$('model').value,
-account:$('acct').value,session:'web'})})).json();
+account:$('acct').value,session:cur.id})});
+if(!res.ok)throw new Error('server said '+res.status);
+const r=await res.json();
 dots.remove();
-say(wait,r.reply);
-if(r.code){
-const c=document.createElement('div');c.className='card';
-const pre=document.createElement('pre');pre.textContent=r.code;c.appendChild(pre);
-wait.appendChild(c);
-const t=document.createElement('div');t.className='tools';
-const run=document.createElement('button');run.textContent='Run it';
-const cp=document.createElement('button');cp.textContent='Copy';
-cp.onclick=()=>{navigator.clipboard.writeText(r.code);cp.textContent='Copied';};
-run.onclick=async()=>{
-run.disabled=true;run.textContent='running...';
-try{
-const d=await(await fetch('/run',{method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({session:'web'})})).json();
-const o=say(wait,d.error?('error: '+d.error):(d.output||'(ran, printed nothing)'));
-o.className=d.error?'out err':'out';
-}catch(e){say(wait,'failed: '+e.message,'out err');}
-run.disabled=false;run.textContent='Run again';};
-t.appendChild(run);t.appendChild(cp);wait.appendChild(t);
-}
-if(r.audio){const a=document.createElement('audio');a.controls=true;a.src=r.audio;
-wait.appendChild(a);a.play().catch(()=>{});}
-if(r.links&&r.links.length){r.links.forEach(l=>{
-const a=document.createElement('a');a.className='link';a.href=l.url;a.target='_blank';
-a.innerHTML=l.title+'<span>'+(l.snippet||l.url)+'</span>';wait.appendChild(a);});}
-}catch(e){dots.remove();say(wait,'Could not reach Nova: '+e.message,'out err');}
-busy=false;$('send').disabled=false;msg.value='';msg.focus();
+const t={who:'bot',text:r.reply,code:r.code,audio:r.audio_url,midi:r.midi_url,
+links:r.links};
+cur.turns.push(t);
+await reveal(b,r.reply);
+if(t.code)codeCard(b,t.code);
+if(t.audio){const a=document.createElement('audio');a.controls=true;a.src=t.audio;
+b.appendChild(a);a.play().catch(()=>{});}
+if(t.midi){const d=document.createElement('a');d.className='link';d.href=t.midi;
+d.download='nova.mid';d.textContent='Download the MIDI';b.appendChild(d);}
+(t.links||[]).forEach(l=>{const a=document.createElement('a');a.className='link';
+a.href=l.url;a.target='_blank';a.innerHTML=fmt(l.title)+'<span>'+
+fmt(l.snippet||l.url)+'</span>';b.appendChild(a);});
+actions(b,t);
+}catch(e){dots.remove();say(b,'Could not reach Nova: '+e.message,'out err');}
+busy=false;$('send').disabled=false;msg.focus();
 feed.scrollTop=feed.scrollHeight;
 }
-$('send').onclick=send;
+$('send').onclick=()=>send();
+$('new').onclick=()=>{newChat();msg.focus();};
 msg.addEventListener('keydown',e=>{
 if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
-msg.addEventListener('input',()=>{msg.style.height='46px';
-msg.style.height=Math.min(msg.scrollHeight,150)+'px';});
+msg.addEventListener('input',()=>{msg.style.height='48px';
+msg.style.height=Math.min(msg.scrollHeight,160)+'px';});
 </script>"""
+
 
 
 # --- milo: chat
@@ -575,8 +599,8 @@ msg.style.height=Math.min(msg.scrollHeight,150)+'px';});
 # replies; the work is real.
 
 BASE = ["status", "help"]
-MUSIC = BASE + ["music", "midi", "arrange"]  # Rio is the music model and
-DEEP = MUSIC + ["styles", "long", "stereo"]  # gets the whole kit at base
+MUSIC = BASE + ["music", "midi", "arrange", "explain"]   # Rio is the music
+DEEP = MUSIC + ["styles", "long", "stereo"]   # model, so it gets the lot
 TALK = BASE + ["search", "code"]            # Milo does words, not music
 MODELS = {
     "rio-1.6":      {"name": "Rio 1.6", "can": MUSIC,
@@ -786,8 +810,7 @@ WORDS = {
                 " when where wiki info facts",
     "music":    "beat track song loop tune banger rhythm groove riff melody"
                 " bassline drum drums percussion bpm bars tempo funk trap"
-                " house dnb lofi reggaeton hear listen play slow fast heavy"
-                " dark chill",
+                " house dnb lofi reggaeton hear listen play slow fast heavy",
     "code":     "code function class script program routine snippet method"
                 " algorithm reverse flip backwards sort order count tally"
                 " average prime factors fibonacci fizzbuzz merge combine"
@@ -868,7 +891,8 @@ WARM = {
 class ChatSession:
     """Remembers enough for follow-ups."""
 
-    def __init__(self, account=""):
+    def __init__(self, account="", key="web"):
+        self.key = key
         self.account = account
         self.name = None
         self.last = {}
@@ -884,7 +908,7 @@ SESSIONS = {}
 
 
 def get_session(key="default", account=""):
-    ses = SESSIONS.setdefault(key, ChatSession(account))
+    ses = SESSIONS.setdefault(key, ChatSession(account, key))
     if account:
         ses.account = account
     return ses
@@ -1002,9 +1026,8 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         others = ", ".join(m["name"] for k, m in MODELS.items() if k != model)
         out["reply"] = (
             f"I'm {spec['name']}. {spec['blurb']} Also here: {others}.\n"
-            f"Straight with you: no language model writes these replies. I match "
-            f"what you ask against what I can do, then do it. The friendliness "
-            f"is hand-written, not thought up.")
+            f"Straight with you: no language model writes these replies. I "
+            f"match what you ask against what I can do, then do it.")
 
     elif intent == "help":
         lines = ["Try:", "  make a trap beat at 140 bpm",
@@ -1025,22 +1048,31 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                         + "  ".join(f"{k} {v}/10" for k, v in sc.items())
                         + f"\n  music: {ms.get('params', 0):,} params, "
                         f"style {ms.get('style')}, from {ms.get('source')}"
-                        f"\n  funk hooks come from the generator, which beat "
-                        f"the model 98% to 95% on staying in key")
+                        f"\n  funk hooks come from the generator (98% in key)")
 
     elif intent == "midi":
         if not ses.last.get("tokens"):
             out["reply"] = "Make something first."
             return out
-        import base64
         mid = tokens_to_midi(ses.last["tokens"], bpm=ses.last.get("bpm", FUNK_BPM))
-        out["midi"] = "data:audio/midi;base64," + base64.b64encode(mid).decode()
+        ses.last["mid"] = mid
+        out["midi_url"] = f"/audio?session={ses.key}&kind=mid"
         out["reply"] = f"MIDI, {len(mid):,} bytes — opens in any DAW."
 
     elif intent == "explain":
         code = ses.last.get("code")
+        if not code and ses.last.get("tokens"):
+            g = ses.last.get("genre", "funk")
+            spec_g = GENRES.get(g, GENRES["funk"])
+            out["reply"] = (
+                f"That's {g} at {ses.last.get('bpm')} bpm. Kick on steps "
+                f"{spec_g['kick'] or 'a tamborzão pattern'} of 16, claps on "
+                f"{spec_g['clap'] or 'the backbeat'}, hats every {spec_g['hat']}."
+                f"\nAn 808 follows each bar's first note, and every hit is nudged "
+                f"a few milliseconds so it doesn't sound like a machine.")
+            return out
         if not code:
-            out["reply"] = "Ask me for some code first, then I'll explain it."
+            out["reply"] = "Ask for some code or a beat first."
             return out
         why = [l[2:] for l in code.split("\n") if l.startswith("# ")]
         body = [l for l in code.split("\n") if l.strip()
@@ -1114,11 +1146,13 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                                                 genre=genre)
         finally:
             trainer.music.style = old
-        import base64
-        out["audio"] = "data:audio/wav;base64," + base64.b64encode(wav).decode()
+        # A 3 MB base64 blob in JSON broke Safari; hand over a URL instead.
+        ses.last["wav"] = wav
+        out["audio_url"] = f"/audio?session={ses.key}&t={int(time.time())}"
         out["notes"] = tokens
         shown = bpm or GENRES[genre]["bpm"]        # not the funk default
-        ses.last.update(bars=bars, bpm=shown, style=style, tokens=tokens)
+        ses.last.update(bars=bars, bpm=shown, style=style, tokens=tokens,
+                        genre=genre)
         lead = (ses.pick("again") if "again" in text.lower() else ses.pick("ack")) if warm else ""
         kind = genre if style == "funk" else "folk melody"
         out["reply"] = (f"{lead} {bars} bars of {kind} at {shown} bpm.{note}"
@@ -1170,8 +1204,10 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
             out["reply"] = "No rule for that — here's a skeleton."
 
     else:
-        out["reply"] = ("Didn't catch that. I do music, search, code, status "
-                        "— type help.")
+        able = [c for c in ("music", "code", "search") if c in spec["can"]]
+        out["reply"] = (f"I didn't catch that one. {spec['name']} does "
+                        f"{', '.join(able) or 'not much'} — try 'help' for "
+                        f"examples, or just say \"make a beat\".")
     return out
 
 def build_app(trainer):
@@ -1228,6 +1264,16 @@ def build_app(trainer):
                                   get_session(body.get("session", "web"),
                                               body.get("account", ""))))
 
+    @app.route("/audio")
+    def audio():
+        ses = get_session(request.args.get("session", "web"))
+        kind = request.args.get("kind", "wav")
+        blob = ses.last.get(kind)
+        if not blob:
+            return jsonify(error="nothing to play"), 404
+        return app.response_class(blob, mimetype="audio/wav" if kind == "wav"
+                                  else "audio/midi")
+
     @app.route("/run", methods=["POST"])
     def run():
         body = request.get_json(silent=True) or {}
@@ -1253,14 +1299,6 @@ def build_app(trainer):
             return jsonify(results=web_search(q, count=int(body.get("count", 5))))
         except Exception as e:
             return jsonify(error=f"Search failed ({type(e).__name__})."), 502
-
-    @app.route("/targets", methods=["POST"])
-    def targets():
-        body = request.get_json(silent=True) or {}
-        picked = {t for t in body.get("targets", []) if t in ("code", "music")}
-        trainer.targets = picked
-        trainer.state["targets"] = sorted(picked)
-        return jsonify(ok=True, targets=sorted(picked))
 
     @app.route("/pause", methods=["POST"])
     def pause():
