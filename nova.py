@@ -56,7 +56,7 @@ CKPT = os.path.join(DATA_DIR, "weights.npz")
 TOKF = os.path.join(DATA_DIR, "tokenizer.json")
 
 def unpack_embedded():
-    """Unpack EMBEDDED weights; disk wins."""
+    """Unpack EMBEDDED weights."""
     import base64
     os.makedirs(DATA_DIR, exist_ok=True)
     written = []
@@ -299,7 +299,7 @@ def rss_mb():
     return round(kb / (1024 if sys.platform.startswith("linux") else 1024 * 1024), 1)
 
 class Trainer:
-    """Holds the models the app serves — now just music, built on first use."""
+    """Holds the music model, built on first use."""
 
     def __init__(self, paths=None, verbose=False):
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -323,7 +323,7 @@ class Trainer:
         return self._music
 
     def start(self):
-        """Train the music model in the background, if asked to."""
+        """Train in the background, if asked."""
         if self.thread and self.thread.is_alive() or self.music is None:
             return
         self._stop = threading.Event()
@@ -421,7 +421,6 @@ cursor:pointer;font:inherit}
   <h1>Nova</h1>
   <button id="new">+ New chat</button>
   <div id="chats"></div>
-  <div class="tag" style="padding:8px 6px">Rio makes music.<br>Milo does words.</div>
 </aside>
 
 <main>
@@ -433,11 +432,10 @@ cursor:pointer;font:inherit}
   <div id="feed"></div>
   <footer>
     <div class="bar">
-      <textarea id="msg" placeholder="Ask Nova anything it can do..."></textarea>
+      <textarea id="msg" placeholder="Ask Nova..."></textarea>
       <button id="send">Send</button>
     </div>
-    <div class="hint">Enter sends, Shift+Enter for a new line. Nova matches what
-    you ask against what it can do — it has no language model inside.</div>
+    <div class="hint">Enter sends, Shift+Enter for a new line.</div>
   </footer>
 </main>
 
@@ -461,7 +459,11 @@ feed.innerHTML='';
 if(!cur.turns.length){welcome();return;}
 cur.turns.forEach(t=>{
 const b=turn(t.who,t.who==='you'?'you':'Nova');
-render(b,t);});
+say(b,t.text);
+if(t.code)codeCard(b,t.code);
+if(t.audio){const a=document.createElement('audio');a.controls=true;
+a.src=t.audio;b.appendChild(a);}
+if(t.who!=='you')actions(b,t);});
 }
 function turn(who,name){
 const d=document.createElement('div');
@@ -491,26 +493,13 @@ p.innerHTML=fmt(text);return p;
 }
 function welcome(){
 const b=turn('bot','Nova');
-say(b,"What are we making? Rio does music, Milo does code and search.");
+say(b,"What are we making?");
 const c=document.createElement('div');c.className='chips';
 ['make a funk beat at 130 bpm','write a fibonacci function',
 'make a lofi loop','search for baile funk'].forEach(t=>{
 const x=document.createElement('button');x.textContent=t;
 x.onclick=()=>{msg.value=t;send();};c.appendChild(x);});
 b.appendChild(c);
-}
-function render(b,t){
-if(t.who==='you'){say(b,t.text);return;}
-say(b,t.text);
-if(t.code)codeCard(b,t.code);
-if(t.audio){const a=document.createElement('audio');a.controls=true;a.src=t.audio;
-b.appendChild(a);}
-if(t.midi){const d=document.createElement('a');d.className='link';d.href=t.midi;
-d.download='nova.mid';d.textContent='Download the MIDI';b.appendChild(d);}
-(t.links||[]).forEach(l=>{const a=document.createElement('a');a.className='link';
-a.href=l.url;a.target='_blank';a.innerHTML=fmt(l.title)+'<span>'+
-fmt(l.snippet||l.url)+'</span>';b.appendChild(a);});
-actions(b,t);
 }
 function codeCard(b,code){
 const c=document.createElement('div');c.className='card';
@@ -541,18 +530,23 @@ a.appendChild(cp);a.appendChild(rg);b.appendChild(a);
 }
 
 async function boot(){
+newChat();                      // exists before any fetch can fail
+try{
 const d=await(await fetch('/models')).json();
 const sel=$('model');
 for(const[id,m]of Object.entries(d.models)){
 const o=document.createElement('option');o.value=id;o.textContent=m.name;
 if(id===d.default)o.selected=true;sel.appendChild(o);}
-const upd=()=>$('blurb').textContent=d.models[sel.value].blurb;
-sel.onchange=upd;upd();newChat();
+const upd=()=>{const m=d.models[sel.value];
+if(m)$('blurb').textContent=m.blurb+' · '+(d.brain||'');};
+sel.onchange=upd;upd();
+}catch(e){$('blurb').textContent='could not load models: '+e.message;}
 }
 boot();
 
 async function send(preset){
 const text=(preset||msg.value).trim();if(!text||busy)return;
+if(!cur)newChat();
 busy=true;$('send').disabled=true;if(!preset)msg.value='';
 msg.style.height='48px';
 if(cur.title==='New chat'){cur.title=text.slice(0,28);drawList();}
@@ -581,8 +575,8 @@ a.href=l.url;a.target='_blank';a.innerHTML=fmt(l.title)+'<span>'+
 fmt(l.snippet||l.url)+'</span>';b.appendChild(a);});
 actions(b,t);
 }catch(e){dots.remove();say(b,'Could not reach Nova: '+e.message,'out err');}
-busy=false;$('send').disabled=false;msg.focus();
-feed.scrollTop=feed.scrollHeight;
+finally{busy=false;$('send').disabled=false;msg.focus();
+feed.scrollTop=feed.scrollHeight;}
 }
 $('send').onclick=()=>send();
 $('new').onclick=()=>{newChat();msg.focus();};
@@ -622,8 +616,7 @@ SUBSCRIBERS = set(w for w in env("NOVA_PAID", "").split(",") if w)
 
 
 def may_use(model, account=""):
-    """Paid tiers need a subscription, admins skip it. Honour system, not
-    security: anyone with this file can edit the list."""
+    """Paid tiers need a subscription, admins skip it. Honour system."""
     if not MODELS.get(model, {}).get("paid"):
         return True, ""
     who = (account or env("NOVA_ACCOUNT", "")).strip().lower()
@@ -645,23 +638,20 @@ def _num(pattern, text, default=None):
 # One blob split on @@.
 _SNIPPET_SRC = """
 @@reverse|backwards
-# A string is letters in a row, like beads on a thread. [::-1] means
-# walk the row backwards: same beads, opposite order.
-# Try it: reverse("funk") gives "knuf"
+# A string is letters in a row, like beads on a thread. [::-1] walks the
+# row backwards: same beads, opposite order. reverse("funk") -> "knuf"
 def reverse(text):
     return text[::-1]
 @@fizzbuzz
-# Count up. For each number: does 3 divide evenly? does 5? (% is the
-# remainder, so % 3 == 0 means it fits.) Say Fizz, Buzz, both, or the
-# number. Try it: fizzbuzz(5) -> 1 2 Fizz 4 Buzz
+# For each number: does 3 divide evenly? does 5? (% is the remainder, so
+# % 3 == 0 means it fits.) fizzbuzz(5) -> 1 2 Fizz 4 Buzz
 def fizzbuzz(n=100):
     for i in range(1, n + 1):
         out = ("Fizz" if i % 3 == 0 else "") + ("Buzz" if i % 5 == 0 else "")
         print(out or i)
 @@fibonacci|fib
 # Each number is the two before it added up: 0, 1, 1, 2, 3, 5...
-# a, b = b, a + b shuffles them along one place each loop.
-# Try it: fib(6) -> [0, 1, 1, 2, 3, 5]
+# a, b = b, a + b shuffles them along one place. fib(6) -> [0,1,1,2,3,5]
 def fib(n):
     a, b, out = 0, 1, []
     for _ in range(n):
@@ -669,9 +659,9 @@ def fib(n):
         a, b = b, a + b
     return out
 @@prime
-# A prime divides only by 1 and itself, so try every number below it.
-# We stop at the square root because factors come in pairs.
-# Try it: is_prime(7) True, is_prime(9) False
+# A prime divides only by 1 and itself, so try every number below it. We
+# stop at the square root because factors come in pairs.
+# is_prime(7) -> True, is_prime(9) -> False
 def is_prime(n):
     if n < 2:
         return False
@@ -681,7 +671,7 @@ def is_prime(n):
     return True
 @@count word|word count
 # A dict is labelled boxes: the word labels it, the count is inside.
-# counts.get(word, 0) means "what's there, or 0 if it's new".
+# counts.get(word, 0) is "what's there, or 0 if it's new".
 # Try it: count_words("a b a") -> {a: 2, b: 1}
 def count_words(text):
     counts = {}
@@ -691,7 +681,7 @@ def count_words(text):
 @@binary search|bisect
 # Like a dictionary: open the middle, keep the half it's in, repeat.
 # Halving each guess means 1000 items take ~10 tries. Must be sorted.
-# Try: binary_search([1, 3, 5], 5) -> 2
+# binary_search([1, 3, 5], 5) -> 2
 def binary_search(items, target):
     lo, hi = 0, len(items) - 1
     while lo <= hi:
@@ -705,8 +695,8 @@ def binary_search(items, target):
     return -1
 @@sort|dictionary
 # Sorting normally goes by the label; here we sort by what's inside.
-# key= says which bit to compare — kv[1] is the value, not the label.
-# Try it: sort_by_value({a: 1, b: 9}) puts b first, because 9 > 1
+# key= says which bit to compare: kv[1] is the value, not the label.
+# Try: sort_by_value({a: 1, b: 9}) puts b first, because 9 > 1
 def sort_by_value(d, biggest_first=True):
     return dict(sorted(d.items(), key=lambda kv: kv[1], reverse=biggest_first))
 @@read a file|read file|open a file
@@ -716,9 +706,9 @@ def read_lines(path):
     with open(path, encoding="utf-8") as f:
         return [line.rstrip() for line in f]
 @@class
-# A class is a cookie cutter; each thing you make is a cookie.
-# __init__ runs when you make one, self is "this particular one",
-# __repr__ is how it prints. Try: Thing("kick") -> Thing('kick')
+# A class is a cookie cutter; each thing you make is a cookie. __init__
+# runs when you make one, self is "this one", __repr__ is how it prints.
+# Try: Thing("kick") -> Thing('kick')
 class Thing:
     def __init__(self, name):
         self.name = name
@@ -726,8 +716,8 @@ class Thing:
     def __repr__(self):
         return f"Thing({self.name!r})"
 @@average|mean
-# The total shared out evenly. sum() adds them, len() counts them.
-# The if guards an empty list, since dividing by zero crashes.
+# The total shared out evenly. sum() adds them, len() counts them. The
+# if guards an empty list, since dividing by zero crashes.
 # Try: average([2, 4]) -> 3.0
 def average(numbers):
     return sum(numbers) / len(numbers) if numbers else 0.0
@@ -790,8 +780,7 @@ _re_ask = __import__("re").compile(
     r"make(?! it)|build|create|parse|fetch|sort|split|join)\b")
 _re_open = __import__("re").compile(r"^(open|read)\s+(the\s+)?(\d+|first|second)")
 
-# Understanding without a language model: each intent owns a bag of words,
-# and the message scores against all of them at once.
+# Understanding without a language model: each intent owns a bag of words.
 STOP = set("a an the i you it that this to for of and is are my me we us can do"
            " with some something please just".split())
 # Filler words like "me" swallowed sentences, so they go first.
@@ -800,22 +789,23 @@ WORDS = {
     "thanks":   "thanks thank cheers appreciate nice sick lovely great"
                 " awesome wicked",
     "identity": "who yourself name model called version robot alive",
-    "help":     "help options commands examples able handle capable stuck",
+    "help":     "help options commands examples able handle stuck",
     "status":   "status trained parameters loss score built version",
     "midi":     "midi mid daw logic ableton reaper cubase stems export",
     "open":     "open link result page article site url first second third",
     "explain":  "explain simpler clearer break walk through meaning means"
-                " mean understand confused lost why",
+                " mean understand confused why",
     "search":   "search google lookup news latest happening won winner"
-                " when where wiki info facts",
+                " when where wiki info",
     "music":    "beat track song loop tune banger rhythm groove riff melody"
                 " bassline drum drums percussion bpm bars tempo funk trap"
-                " house dnb lofi reggaeton hear listen play slow fast heavy",
+                " house dnb lofi reggaeton hardstyle hardcore rave hear"
+                " listen play slow fast heavy",
     "code":     "code function class script program routine snippet method"
                 " algorithm reverse flip backwards sort order count tally"
                 " average prime factors fibonacci fizzbuzz merge combine"
                 " remove duplicate tidy convert calculate palindrome list"
-                " dict string number numbers file json",
+                " dict string number numbers json",
 }
 BAGS = {k: set(v.split()) - STOP for k, v in WORDS.items()}
 SPREAD = {}
@@ -826,7 +816,7 @@ VOCAB = sorted(SPREAD)
 
 
 def detect_intent(text):
-    """Score against each intent's bag, allowing for typos."""
+    """Score against each bag, allowing for typos."""
     import difflib
     import re as _re
     t = text.lower().strip()
@@ -864,6 +854,8 @@ def detect_intent(text):
                            ("ableton", "midi")):
         if phrase in t:
             scores[intent] += 2.5
+    if len(t.split()) > 3:
+        scores["greet"] = 0        # "yo make me a beat" is a beat, not a hello
     if _re_ask.match(t) and not scores["music"]:
         scores["code"] += 2
     if words & {"average", "flip", "backwards", "divisible", "factors"}:
@@ -892,6 +884,7 @@ class ChatSession:
     """Remembers enough for follow-ups."""
 
     def __init__(self, account="", key="web"):
+        self.history = []
         self.key = key
         self.account = account
         self.name = None
@@ -915,12 +908,13 @@ def get_session(key="default", account=""):
 
 
 def run_code(code, timeout=5):
-    """Run generated code in a child process. Only ever code Nova made for
-    this session, never browser text, with a timeout."""
+    """Run generated code in a child process — only ever code Nova made for
+    this session, never browser text."""
     import re as _re
     import subprocess
     import sys as _sys
-    demo = _re.search(r"Try(?: it)?:\s*([A-Za-z_]\w*\([^)]*\))", code)
+    # any "name(args) ->" in a comment is an example we can run
+    demo = _re.search(r"([A-Za-z_]\w*\([^)]*\))\s*(?:->|gives)", code)
     script = code
     if demo:
         call = demo.group(1)
@@ -955,6 +949,129 @@ WARM = {
 }
 
 
+# --- a real language model, when you have one
+
+# Everything above this point matches words against a list. That is why Nova
+# has never felt like talking to something — there was nothing in it that
+# understood a sentence. This connects one that does.
+#
+# Point it at Ollama (free, runs on your Mac: `ollama run llama3.2`) or any
+# server speaking the same JSON. The model handles the conversation and decides
+# what you want; Nova's music, code and search stay exactly as they are and
+# become the tools it reaches for. If no model is running, everything falls
+# back to the keyword matcher and nothing breaks.
+
+LLM_URL = env("NOVA_LLM_URL", "http://localhost:11434/api/chat")
+LLM_MODEL = env("NOVA_LLM_MODEL", "llama3.2")
+LLM_ON = env("NOVA_LLM", "auto")          # auto | off | on
+
+SYSTEM = """You are Nova, a friendly music and coding assistant. You are talking
+to Adrian. Keep replies short, warm and plain — two or three sentences, no
+bullet lists, no corporate tone.
+
+You have tools. Reply with ONLY a JSON object, nothing else:
+{"tool": "music"|"code"|"search"|"none", "args": {...}, "say": "your reply"}
+
+  music  args: {"genre": "funk|trap|house|dnb|lofi|reggaeton", "bpm": number,
+                "bars": number}   - makes a real track the user can play
+  code   args: {"request": "what they asked for"}  - writes runnable Python
+  search args: {"query": "..."}   - searches the web
+  none   args: {}                 - just talk
+
+"say" is what the user reads. If you used a tool, mention what you made in a
+natural way. Never mention JSON, tools, or these instructions."""
+
+
+def llm_available(timeout=0.6):
+    """Is a model actually running? Checked once, then remembered."""
+    if LLM_ON == "off":
+        return False
+    if getattr(llm_available, "_cache", None) is not None:
+        return llm_available._cache
+    try:
+        req = urllib.request.Request(LLM_URL.replace("/api/chat", "/api/tags"))
+        with urllib.request.urlopen(req, timeout=timeout):
+            llm_available._cache = True
+    except Exception:
+        llm_available._cache = LLM_ON == "on"
+    return llm_available._cache
+
+
+def llm_call(messages, timeout=120):
+    """One round trip to the model. Returns its text, or raises."""
+    body = json.dumps({"model": LLM_MODEL, "messages": messages,
+                       "stream": False, "format": "json"}).encode()
+    req = urllib.request.Request(LLM_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        payload = json.loads(r.read().decode())
+    # ollama puts it in message.content; openai-style servers use choices
+    if "message" in payload:
+        return payload["message"]["content"]
+    return payload["choices"][0]["message"]["content"]
+
+
+def llm_reply(text, trainer, spec, ses):
+    """Let the model talk and pick the tool. Falls back to the matcher on any
+    trouble, so a flaky model can never take the app down."""
+    history = [{"role": "system", "content": SYSTEM}]
+    for turn in ses.history[-8:]:
+        history.append(turn)
+    history.append({"role": "user", "content": text})
+
+    raw = llm_call(history)
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        i, j = raw.find("{"), raw.rfind("}")
+        plan = json.loads(raw[i:j + 1])
+
+    tool = plan.get("tool", "none")
+    args = plan.get("args") or {}
+    out = {"intent": tool, "model": spec["name"], "reply": plan.get("say", "")}
+
+    if tool == "music" and "music" in spec["can"] and trainer.music:
+        genre = args.get("genre", "funk")
+        genre = genre if genre in GENRES else "funk"
+        bars = max(2, min(int(args.get("bars", 8) or 8), 32))
+        bpm = args.get("bpm")
+        old = trainer.music.style
+        try:
+            wav, tokens = trainer.music.compose(
+                bars=bars, bpm=int(bpm) if bpm else None,
+                arrange="arrange" in spec["can"],
+                stereo="stereo" in spec["can"], genre=genre)
+        finally:
+            trainer.music.style = old
+        ses.last.update(wav=wav, tokens=tokens, genre=genre, bars=bars,
+                        bpm=bpm or GENRES[genre]["bpm"])
+        out["audio_url"] = f"/audio?session={ses.key}&t={int(time.time())}"
+
+    elif tool == "code" and "code" in spec["can"]:
+        code, _ = write_code(args.get("request", text),
+                             adapt="compose" in spec["can"])
+        out["code"] = code
+        ses.last["code"] = code
+        if "deep" in spec["can"]:
+            good, err = run_code(code)
+            if good:
+                out["checked"] = f"checked it — output: {good.splitlines()[0][:50]}"
+                out["reply"] += "\n" + out["checked"]
+            elif err and "Nothing to show" not in err:
+                out["checked"] = f"heads up, it errored: {err[:60]}"
+                out["reply"] += "\n" + out["checked"]
+
+    elif tool == "search" and "search" in spec["can"]:
+        try:
+            out["links"] = web_search(args.get("query", text), count=5)
+        except Exception:
+            out["reply"] += " (the search itself failed, though.)"
+
+    ses.history.append({"role": "user", "content": text})
+    ses.history.append({"role": "assistant", "content": out["reply"]})
+    return out
+
+
 def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
     """-> dict: reply plus audio/links/code/midi when relevant."""
     spec = MODELS.get(model, MODELS[DEFAULT_MODEL])
@@ -972,6 +1089,12 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         ses.name = m_.group(1).capitalize()
         return {"intent": "name", "model": spec["name"],
                 "reply": f"Good to meet you, {ses.name}. What are we making?"}
+
+    if llm_available():          # a real model talks; Nova's tools do the work
+        try:
+            return llm_reply(text, trainer, spec, ses)
+        except Exception as e:
+            ses.state_note = f"model unreachable ({type(e).__name__})"
 
     intent = detect_intent(text)
     if intent.startswith("unsure:"):
@@ -1286,8 +1409,10 @@ def build_app(trainer):
 
     @app.route("/models")
     def models():
+        brain = (f"{LLM_MODEL} via Ollama" if llm_available()
+                 else "keyword matching (no model running)")
         out = {k: dict(v, scores=scores(v)) for k, v in MODELS.items()}
-        return jsonify(models=out, default=DEFAULT_MODEL)
+        return jsonify(models=out, default=DEFAULT_MODEL, brain=brain)
 
     @app.route("/search", methods=["POST"])
     def search():
@@ -1416,7 +1541,7 @@ CLAP_VARIANTS = [[4, 12], [4, 12, 14], [3, 7, 11, 15], [4, 10, 12]]
 # Same engine, different numbers: kick/clap are 16-step patterns.
 PHRYGIAN = [0, 1, 3, 5, 7, 8, 10]     # the b2 gives mandelão its darkness
 GENRES = {
-    "funk":      dict(bpm=130, kick=None, clap=None, hat=2, sub=.6, swing=0,
+    "funk":      dict(bpm=130, kick=None, clap=None, hat=2, sub=.6, swing=.05,
                       mode=None),
     "trap":      dict(bpm=140, kick=[0, 6, 10], clap=[8], hat=1, sub=.85,
                       swing=0, mode=PHRYGIAN),
@@ -1428,6 +1553,8 @@ GENRES = {
                       sub=.55, swing=.08, mode=MINOR),
     "lofi":      dict(bpm=82, kick=[0, 10], clap=[8], hat=4, sub=.45,
                       swing=.18, mode=MINOR),
+    "hardstyle": dict(bpm=150, kick=[0, 4, 8, 12], clap=[4, 12], hat=2,
+                      sub=.30, swing=0, mode=MINOR, low=.34),
 }
 # Share of spectrum under 140 Hz; the renderer balances to it.
 FUNK_LOW_TARGET = env("MYCODER_LOW_TARGET", 0.26, float)
@@ -1517,88 +1644,165 @@ def funk_corpus(n=12000, seed=0):
 def _env(n, decay):
     return np.exp(-np.arange(n, dtype=np.float32) / SR * decay)
 
-def _highpass(x):
+
+def _highpass(x, k=9):
     """Cheap high pass: signal minus its smoothed self."""
-    k = np.ones(9, dtype=np.float32) / 9
-    return x - np.convolve(x, k, mode="same")
+    return x - np.convolve(x, np.ones(k, dtype=np.float32) / k, mode="same")
 
-def _kick(dur=0.30):
+
+def _lowpass(x, k):
+    return np.convolve(x, np.ones(max(2, k), dtype=np.float32) / max(2, k),
+                       mode="same")
+
+
+def _noise(n, seed):
+    return np.random.default_rng(seed).standard_normal(n).astype(np.float32)
+
+
+# The tamborzão isn't a drum machine — it's hand percussion. A surdo carries the
+# low pulse, atabaques (hand drums) answer in the mids, a rim click cuts through.
+# Sine-with-a-pitch-drop is a drum; sine-with-a-pitch-drop plus distortion is
+# hardstyle, which is what this used to sound like.
+
+def _kick(dur=0.34):
+    """Surdo: deep, round, barely any click. Not a distorted EDM kick."""
     n = int(dur * SR)
     t = np.arange(n, dtype=np.float32) / SR
-    freq = 42.0 + 95.0 * np.exp(-t * 32)                 # pitch drops fast: the thump
-    phase = np.cumsum(2 * np.pi * freq / SR)
-    body = np.sin(phase) * _env(n, 9)
-    noise = np.random.default_rng(1).standard_normal(n).astype(np.float32)
-    click = _highpass(noise) * _env(n, 400) * 0.25
-    return np.tanh((body + click) * 1.7)                 # drive it
+    freq = 47.0 + 68.0 * np.exp(-t * 26)              # gentler sweep, more body
+    body = np.sin(np.cumsum(2 * np.pi * freq / SR)) * _env(n, 7.5)
+    skin = _lowpass(_noise(n, 1), 12) * _env(n, 90) * 0.18   # the beater, soft
+    return np.tanh((body + skin) * 1.05) * 0.95        # barely any drive
 
-def _clap(seed=0, dur=0.26):
+
+def _hardkick(midi=36, dur=0.42):
+    """Hardstyle kick: click, then a distorted tail that drops in pitch. The
+    tail is tuned, so the kick plays the bassline — that's the whole genre."""
     n = int(dur * SR)
-    r = np.random.default_rng(seed)
-    noise = _highpass(r.standard_normal(n).astype(np.float32))
-    out = np.zeros(n, dtype=np.float32)
-    for k, off in enumerate((0.0, 0.011, 0.023)):        # three flams = a clap
-        i = int(off * SR)
-        out[i:] += (noise[:n - i] * _env(n - i, 55 if k < 2 else 22)) * (0.7 if k < 2 else 1.0)
-    return out * 0.6
-
-def _hat(seed=0, dur=0.055, open_=False):
-    n = int(dur * (3 if open_ else 1) * SR)
-    noise = _highpass(np.random.default_rng(seed).standard_normal(n).astype(np.float32))
-    return noise * _env(n, 45 if open_ else 130) * 0.35
-
-def _sub(midi, dur):
-    """808 sub with a glide into the note."""
-    n = max(1, int(dur * SR))
     t = np.arange(n, dtype=np.float32) / SR
-    target = 440.0 * 2 ** ((midi - 69) / 12.0)
-    freq = target * (1 + 0.5 * np.exp(-t * 45))          # glide
-    phase = np.cumsum(2 * np.pi * freq / SR)
-    return np.tanh(np.sin(phase) * 1.4) * _env(n, 3.2)
+    punch = np.sin(np.cumsum(2 * np.pi * (150 + 900 * np.exp(-t * 120)) / SR))
+    punch *= _env(n, 70) * 0.9
+    root = 440.0 * 2 ** ((midi - 69) / 12.0)
+    freq = root * (1 + 5.0 * np.exp(-t * 55))         # long pitch fall
+    tail = np.sin(np.cumsum(2 * np.pi * freq / SR)) * _env(n, 5.5)
+    tail = np.tanh(tail * 4.5)                        # the distortion is the point
+    tail = _lowpass(tail, 3)                          # tame the very top
+    return np.clip(punch * 0.5 + tail * 0.85, -1, 1)
 
-def _lead(midi, dur):
+
+def _screech(midi, dur):
+    """Detuned saws — the euphoric hardstyle lead."""
     n = max(1, int(dur * SR))
     t = np.arange(n, dtype=np.float32) / SR
     f = 440.0 * 2 ** ((midi - 69) / 12.0)
-    tone = (np.sign(np.sin(2 * np.pi * f * t)) * 0.5
-            + np.sign(np.sin(2 * np.pi * f * 1.005 * t)) * 0.5)   # slight detune
-    envelope = np.ones(n, dtype=np.float32)
-    a = max(1, int(0.006 * SR)); rl = max(1, int(min(0.09, dur * 0.6) * SR))
-    envelope[:a] = np.linspace(0, 1, a)
-    envelope[-rl:] *= np.linspace(1, 0, rl)
-    return tone * envelope * 0.45
+    saw = sum(((t * f * d) % 1.0 - 0.5) for d in (0.994, 1.0, 1.006))
+    env = _env(n, 3.0)
+    a = max(1, int(0.01 * SR))
+    env[:a] *= np.linspace(0, 1, a)
+    return _lowpass(np.tanh(saw * 1.4), 3) * env * 0.32
 
-def tokens_to_midi(tokens, bpm=FUNK_BPM, div=480):
-    """Note tokens -> .mid for any DAW."""
-    import struct as _st
-    def vlq(n):
-        out = bytearray([n & 0x7F]); n >>= 7
-        while n:
-            out.insert(0, (n & 0x7F) | 0x80); n >>= 7
-        return bytes(out)
-    trk, wait = bytearray(), 0
-    us = int(60_000_000 / bpm)
-    trk += b"\x00\xff\x51\x03" + us.to_bytes(3, "big")      # tempo
-    for tok in tokens.split():
-        if "/" not in tok:
-            continue
-        name, _, dur = tok.partition("/")
-        try:
-            ticks = int(dur) * div // 4
-        except ValueError:
-            continue
-        if name == "R":
-            wait += ticks; continue
-        try:
-            note = name_midi(name)
-        except (ValueError, IndexError):
-            wait += ticks; continue
-        trk += vlq(wait) + bytes([0x90, note, 100])
-        trk += vlq(ticks) + bytes([0x80, note, 0])
-        wait = 0
-    trk += b"\x00\xff\x2f\x00"
-    return (b"MThd" + _st.pack(">IHHH", 6, 0, 1, div)
-            + b"MTrk" + _st.pack(">I", len(trk)) + bytes(trk))
+
+def _voice(midi, dur=0.16, vowel=0):
+    """A vowel-ish chop. Funk is built on chopped voices — a saw run through
+    three formant peaks reads as "ah"/"eh"/"oh" to the ear, and stuttering it
+    on the grid is the montagem sound."""
+    n = max(1, int(dur * SR))
+    t = np.arange(n, dtype=np.float32) / SR
+    f = 440.0 * 2 ** ((midi - 69) / 12.0)
+    F = ((730, 1090, 2440), (530, 1840, 2480), (570, 840, 2410))[vowel % 3]
+    out = np.zeros(n, dtype=np.float32)
+    for h in range(1, 26):                       # harmonics of the voice
+        hz = f * h
+        if hz > SR / 2:
+            break
+        gain = sum(np.exp(-((hz - c) / (c * 0.28)) ** 2) for c in F)
+        if gain > 0.02:
+            out += np.sin(2 * np.pi * hz * t) * gain / h ** 0.4
+    env = _env(n, 12)
+    a = max(1, int(0.006 * SR))
+    env[:a] *= np.linspace(0, 1, a)
+    return out / (np.abs(out).max() or 1) * env * 0.5
+
+
+def _whistle(dur=0.45):
+    """Apito: the referee whistle all over baile funk."""
+    n = int(dur * SR)
+    t = np.arange(n, dtype=np.float32) / SR
+    wob = 1 + 0.02 * np.sin(2 * np.pi * 11 * t)          # the trill
+    tone = np.sin(np.cumsum(2 * np.pi * 2100 * wob / SR))
+    tone += 0.3 * np.sin(np.cumsum(2 * np.pi * 3150 * wob / SR))
+    air = _highpass(_noise(n, 9), 3) * 0.25
+    env = _env(n, 6)
+    env[:int(0.02 * SR)] *= np.linspace(0, 1, int(0.02 * SR))
+    return (tone + air) * env * 0.3
+
+
+def _tom(midi=52, dur=0.26, seed=2):
+    """Atabaque: a hand drum with real pitch. This is the funk sound."""
+    n = int(dur * SR)
+    t = np.arange(n, dtype=np.float32) / SR
+    f0 = 440.0 * 2 ** ((midi - 69) / 12.0)
+    freq = f0 * (1 + 0.55 * np.exp(-t * 30))          # slaps bend down
+    body = np.sin(np.cumsum(2 * np.pi * freq / SR)) * _env(n, 13)
+    ring = np.sin(np.cumsum(2 * np.pi * freq * 1.6 / SR)) * _env(n, 22) * 0.35
+    slap = _lowpass(_noise(n, seed), 6) * _env(n, 120) * 0.3
+    return (body + ring + slap) * 0.8
+
+
+def _rim(dur=0.06, seed=3):
+    """Rim click: short, woody, cuts through the mix."""
+    n = int(dur * SR)
+    tone = np.sin(2 * np.pi * 780 * np.arange(n, dtype=np.float32) / SR)
+    wood = _lowpass(_highpass(_noise(n, seed), 5), 3)
+    return (tone * 0.5 + wood) * _env(n, 150) * 0.55
+
+
+def _clap(seed=0, dur=0.24):
+    """Three flams, filtered — a clap, not a burst of static."""
+    n = int(dur * SR)
+    r = np.random.default_rng(seed)
+    noise = _lowpass(_highpass(r.standard_normal(n).astype(np.float32), 7), 4)
+    out = np.zeros(n, dtype=np.float32)
+    for k, off in enumerate((0.0, 0.012, 0.025)):
+        i = int(off * SR)
+        out[i:] += noise[:n - i] * _env(n - i, 60 if k < 2 else 26)
+    body = np.sin(2 * np.pi * 190 * np.arange(n, dtype=np.float32) / SR)
+    return (out * 0.5 + body * _env(n, 40) * 0.25) * 0.75
+
+
+def _hat(seed=0, dur=0.05, open_=False):
+    """Shaker rather than white noise: narrower, softer, sits back."""
+    n = int(dur * (3 if open_ else 1) * SR)
+    noise = _lowpass(_highpass(_noise(n, seed), 4), 3)
+    return noise * _env(n, 40 if open_ else 110) * 0.3
+
+
+def _sub(midi, dur):
+    """808 sub with a short glide into the note. Clean, not saturated."""
+    n = max(1, int(dur * SR))
+    t = np.arange(n, dtype=np.float32) / SR
+    target = 440.0 * 2 ** ((midi - 69) / 12.0)
+    freq = target * (1 + 0.4 * np.exp(-t * 40))
+    tone = np.sin(np.cumsum(2 * np.pi * freq / SR))
+    return np.tanh(tone * 1.15) * _env(n, 2.6) * 0.9
+
+
+def _lead(midi, dur):
+    """A plucked tone: soft triangle-ish harmonics that decay, so it reads as
+    an instrument instead of a buzzing square wave."""
+    n = max(1, int(dur * SR))
+    t = np.arange(n, dtype=np.float32) / SR
+    f = 440.0 * 2 ** ((midi - 69) / 12.0)
+    tone = (np.sin(2 * np.pi * f * t)
+            + 0.34 * np.sin(2 * np.pi * f * 2 * t) * _env(n, 9)
+            + 0.16 * np.sin(2 * np.pi * f * 3 * t) * _env(n, 16)
+            + 0.07 * np.sin(2 * np.pi * f * 4.02 * t) * _env(n, 24))
+    envelope = _env(n, 4.5)
+    a = max(1, int(0.008 * SR))
+    envelope[:a] *= np.linspace(0, 1, a)
+    rl = max(1, int(min(0.09, dur * 0.5) * SR))
+    envelope[-rl:] *= np.linspace(1, 0, rl)
+    return tone * envelope * 0.42
+
 
 def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
                human=True, genre="funk"):
@@ -1650,7 +1854,18 @@ def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
             target[i:end] += sig[:end - i] * gain
 
     # drums, bar by bar
-    kick = _kick()
+    hard = genre == "hardstyle"
+    chop_note = None
+    if notes:
+        chop_note = int(np.median([n for _, _, n in notes])) + 12
+        while chop_note > 76:
+            chop_note -= 12
+    root_note = 36
+    if notes:
+        root_note = min(n for _, _, n in notes)
+        while root_note > 40:
+            root_note -= 12
+    kick = _hardkick(root_note) if hard else _kick()
     n_bars = max(1, int(np.ceil(total / (16 * spb))))
     # Real drummers push, drag and hit unevenly; a perfect grid sounds machine.
     hum = (lambda: float(r.normal(0, 0.006))) if human else (lambda: 0.0)
@@ -1661,14 +1876,42 @@ def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
         for step in kick_pat:
             place(kick, sw(step), 1.35 * vel(), "low")
         for step in clap_pat:
-            place(_clap(seed=bar * 7 + step), sw(step), 0.5 * vel())
+            place(_clap(seed=bar * 7 + step), sw(step), 0.38 * vel())
+        if hard:
+            # reverse bass: a stab on every offbeat, ducking under the kick
+            for step in (2, 6, 10, 14):
+                place(_sub(root_note + 12, 2 * spb), sw(step), 0.75 * vel())
+        else:
+            # The atabaques: hand drums answering the surdo on the off-tresillo.
+            # That call-and-response is what makes it funk and not EDM.
+            for k, step in enumerate(s for s in TRESILLO if s not in kick_pat):
+                place(_tom(52 + (k % 3) * 4, seed=bar * 5 + step), sw(step),
+                      0.55 * vel())
+                # ghost note: a quiet slap just after, the way a hand player
+                # fills the gap between the loud hits
+                if r.random() < 0.5:
+                    place(_tom(52 + (k % 3) * 4 + 3, 0.12, seed=bar + step),
+                          sw(step) + spb * 0.5, 0.2 * vel())
+            for step in (2, 7, 11, 15):
+                if r.random() < 0.55:
+                    place(_rim(seed=bar * 11 + step), sw(step), 0.4 * vel())
+            # Montagem: a chopped voice stuttered on the grid, answering the
+            # drums. Two or three hits, same note, tight together.
+            if genre == "funk" and bar % 2 == 1 and chop_note:
+                start_step = int(r.choice([6, 10, 12]))
+                for k in range(int(r.integers(2, 5))):
+                    place(_voice(chop_note + 12 * (k == 2),
+                                 0.13, vowel=bar + k),
+                          sw(start_step) + k * spb * 0.5, 0.6 * vel())
+            if genre == "funk" and bar and bar % 4 == 0 and r.random() < 0.6:
+                place(_whistle(), base - 2 * spb, 0.5)   # apito into the turn
         if human and bar and bar % 4 == 3:               # a fill before the turn
             for k, step in enumerate((12, 13, 14, 15)):
                 place(_clap(seed=bar * 31 + k), base + step * spb,
                       0.28 + 0.09 * k)
         for step in range(0, 16, g["hat"]):              # hats sit well back
             place(_hat(seed=bar * 13 + step, open_=(step == 14)),
-                  sw(step), 0.22 * vel())
+                  sw(step), 0.13 * vel())
             if r.random() < 0.18:
                 place(_hat(seed=bar * 17 + step), base + (step + 1) * spb, 0.14)
 
@@ -1679,7 +1922,7 @@ def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
             continue
         while midi > 52:
             midi -= 12                                   # keep the sub low
-        if not (arrange and bar == 0):
+        if not (arrange and bar == 0) and not hard:
             place(_sub(midi, 16 * spb * g["sub"]), bar * 16 * spb, 1.25, "low")
 
     quiet = set()
@@ -1690,9 +1933,22 @@ def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
         if int(start / (16 * spb)) in quiet:
             continue
         step = int(round(start / spb)) % 16
-        if step not in TRESILLO and step % 2 and r.random() < 0.45:
-            continue                                     # thin it out
-        place(_lead(midi, min(dur, 3 * spb)), start, 0.42)
+        if step not in TRESILLO and r.random() < 0.62:
+            continue                                     # leave space
+        voice = _screech if hard else _lead
+        place(voice(midi, min(dur, 3 * spb)), start, 0.5 if hard else 0.30)
+
+    # Sidechain: dip everything when the kick lands.
+    duck = np.ones(n_total, dtype=np.float32)
+    fall = np.exp(-np.arange(int(.18 * SR), dtype=np.float32) / (.055 * SR))
+    for bar in range(n_bars):
+        for step in kick_pat:
+            i = max(0, int((bar * 16 + step) * spb * SR))
+            seg = duck[i:i + len(fall)]
+            duck[i:i + len(seg)] = np.minimum(seg, 1 - 0.7 * fall[:len(seg)])
+    top_bus *= duck
+    top_bus = .65 * top_bus + .35 * np.convolve(
+        top_bus, np.ones(3, np.float32) / 3, mode="same")   # tame the fizz
 
     # Bisect the top-bus gain to hit the low-end target: six passes.
     def low_share(gain):
@@ -1702,21 +1958,21 @@ def synth_funk(tokens, bpm=None, seed=0, arrange=False, stereo=False,
         total_e = spec.sum() or 1.0
         return spec[(freqs > 25) & (freqs < 140)].sum() / total_e
 
-    lo_g, hi_g = 0.15, 4.0
-    if low_share(1.0) < FUNK_LOW_TARGET:
+    lo_g, hi_g = 0.15, 9.0
+    if low_share(1.0) < g.get("low", FUNK_LOW_TARGET):
         lo_g, hi_g = 0.15, 1.0                        # too bright: pull the top down
     else:
-        lo_g, hi_g = 1.0, 4.0                         # too dark: bring it up
+        lo_g, hi_g = 1.0, 9.0                         # too dark: bring it up
     for _ in range(6):
         mid = (lo_g + hi_g) / 2
-        if low_share(mid) > FUNK_LOW_TARGET:
+        if low_share(mid) > g.get("low", FUNK_LOW_TARGET):
             lo_g = mid
         else:
             hi_g = mid
     buf = low_bus + top_bus * ((lo_g + hi_g) / 2)
 
     peak = np.abs(buf).max() or 1.0
-    buf = np.tanh(buf / peak * 1.2) * 0.88
+    buf = np.tanh(buf / peak * 0.85) * 0.94
 
     import wave as _wave
     out = io.BytesIO()
@@ -2184,7 +2440,12 @@ def run_tests():
     # 13. each genre must render its own kick pattern, not funk relabelled
     import wave as _w2
     saved_c, saved_h = _clap, _hat
-    globals()["_clap"] = globals()["_hat"] = lambda *a, **k: np.zeros(64, np.float32)
+    hush = lambda *a, **k: np.zeros(64, np.float32)
+    saved_t, saved_r = _tom, _rim
+    globals()["_clap"] = globals()["_hat"] = hush
+    globals()["_tom"] = globals()["_rim"] = hush
+    saved_sub = _sub
+    globals()["_sub"] = hush
     try:
         rest = " ".join(["R/8 R/8 |"] * 4)
         genre_ok = True
@@ -2199,13 +2460,19 @@ def run_tests():
             got = []
             for st in range(16):
                 k = int(st * sp * SR)
-                here, prev = amp[k:k + 300], amp[max(0, k - 400):k]
-                if len(here) and here.max() > 8000 and (not len(prev)
-                                                        or prev.max() < 8000):
+                # A hit is a jump in energy, not silence beforehand: the
+                # hardstyle kick rings into the next beat, and swung genres
+                # land their kicks a few hundred samples late.
+                here, prev = amp[k:k + 700], amp[max(0, k - 700):k]
+                h = here.max() if len(here) else 0
+                p = prev.max() if len(prev) else 0
+                if h > 8000 and (p == 0 or h > p * 1.3):
                     got.append(st)
             genre_ok &= set(got) == set(gspec["kick"])
     finally:
         globals()["_clap"], globals()["_hat"] = saved_c, saved_h
+        globals()["_tom"], globals()["_rim"] = saved_t, saved_r
+        globals()["_sub"] = saved_sub
     print(f"genre kick patterns: {'PASS' if genre_ok else 'FAIL'}")
 
     # 14. natural phrasing, not just the words I happened to pick
@@ -2220,12 +2487,16 @@ def run_tests():
           f"{'PASS' if natural_ok else 'FAIL ' + str(miss)}")
 
     # 15. the paid tier must gate, and admins must get in free
+    # tests cover Nova's own logic, not whatever model happens to be running
+    was = getattr(llm_available, "_cache", None)
+    llm_available._cache = False
     _t = Trainer(verbose=False)
     blocked = milo_reply("write a fizzbuzz", _t, "nova-iris",
                          ChatSession())["intent"]
     admin = milo_reply("write a fizzbuzz", _t, "nova-iris",
                        ChatSession("editornova"))
     tier_ok = blocked == "locked" and "code" in admin and "checked" in admin
+    llm_available._cache = was
     print(f"paid gate, admin free, deep check: {'PASS' if tier_ok else 'FAIL'}")
 
     # 16. the chat router must map plain phrasing to the right capability
