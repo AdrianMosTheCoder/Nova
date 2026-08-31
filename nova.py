@@ -1046,7 +1046,10 @@ WORDS = {
     "thanks":   "thanks thank cheers appreciate nice sick lovely great"
                 " awesome wicked",
     "identity": "who yourself name model called version robot alive",
-    "help":     "help options commands examples able handle stuck",
+    "help":     "help options commands examples able handle",
+    "trouble":  "stopped stop broken break bad sucks useless rubbish wrong"
+                " nothing works working failed fix stuck bro wtf hell dumb"
+                " terrible awful rubbish crap",
     "status":   "status trained parameters loss score built version",
     "midi":     "midi mid daw logic ableton reaper cubase stems export",
     "open":     "open link result page article site url first second third",
@@ -1163,6 +1166,7 @@ class ChatSession:
     """Remembers enough for follow-ups."""
 
     def __init__(self, account="", key="web"):
+        self.misses = 0
         self.prefs = {}
         self.history = []
         self.key = key
@@ -1556,6 +1560,8 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         return {"intent": "thanks", "model": spec["name"], "reply": ses.pick("thanks")}
 
     out = {"intent": intent, "model": spec["name"]}
+    if intent not in ("unknown", "empty"):
+        ses.misses = 0
 
     if intent not in spec["can"] and intent in (
             "code", "search", "midi", "open", "music", "explain"):
@@ -1608,6 +1614,22 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
         ses.last["mid"] = mid
         out["midi_url"] = f"/audio?session={ses.key}&kind=mid"
         out["reply"] = f"MIDI, {len(mid):,} bytes — opens in any DAW."
+
+    elif intent == "trouble":
+        last = ses.last.get("gave")
+        if last == "trouble":
+            out["reply"] = ("Alright, plainly: tell me the thing you want in "
+                            "your own words — like \"add up a list\" or "
+                            "\"trap beat 150\" — and I'll do it or say I can't.")
+        elif ses.last.get("code") or ses.last.get("tokens"):
+            out["reply"] = ("Fair. What was wrong with the last one — should it "
+                            "do something different, or did it not work at all?")
+        else:
+            out["reply"] = ("Yeah, that's on me. What were you trying to get? "
+                            "Say it however you like and I'll tell you straight "
+                            "whether I can do it.")
+        ses.last["gave"] = "trouble"
+        return out
 
     elif intent == "explain":
         code = ses.last.get("code")
@@ -1796,10 +1818,30 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                     f"Say 'skeleton' if you want a blank function to fill in.")
 
     else:
+        # Repeating the same "didn't catch that" is the most annoying thing a
+        # program can do. Each miss in a row gets a different, humbler answer.
+        ses.misses += 1
         able = [c for c in ("music", "code", "search") if c in spec["can"]]
-        out["reply"] = (f"I didn't catch that one. {spec['name']} does "
-                        f"{', '.join(able) or 'not much'} — try 'help' for "
-                        f"examples, or just say \"make a beat\".")
+        annoyed = any(w in low for w in ("bro", "actually", "stupid", "useless",
+                                         "dumb", "trash", "come on", "wtf",
+                                         "!!", "?!")) or text.isupper()
+        if annoyed or ses.misses >= 3:
+            out["reply"] = (
+                "Fair — I'm not getting it, and repeating myself isn't helping.\n"
+                "Straight answer: without a language model running I match "
+                "keywords, so anything I wasn't built for slides straight past "
+                "me.\nGive me one word and I'll act on it: beat, code, or "
+                "search. Or start Ollama on this machine and I'll actually "
+                "understand you.")
+        elif ses.misses == 2:
+            out["reply"] = ("Still not with you. Try telling me the thing you "
+                            f"want rather than the sentence — like \"average of "
+                            f"a list\" or \"trap beat 140\". {spec['name']} does "
+                            f"{', '.join(able)}.")
+        else:
+            out["reply"] = (f"Didn't catch that. {spec['name']} does "
+                            f"{', '.join(able) or 'not much'} — say 'help' for "
+                            f"examples.")
     return out
 
 def build_app(trainer):
