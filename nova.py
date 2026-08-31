@@ -748,11 +748,262 @@ for _chunk in _SNIPPET_SRC.strip().split("@@"):
     if _body.strip():
         SNIPPETS.append((_head.split("|"), _body.rstrip()))
 
+# --- writing code without a model
+#
+# A lookup table only ever knows the phrases someone typed into it. This reads
+# the request instead: what operation, on what kind of thing, with what extras,
+# then builds the function from parts. It covers far more than the snippets did
+# because "biggest", "largest", "highest" and "max" all land on one operation,
+# and "top 3" fills in a number.
+
+OPS = {
+    # name          words that mean it
+    "sum":        "sum add total add-up adding",
+    "average":    "average mean avg typical",
+    "max":        "largest biggest highest max maximum greatest top",
+    "min":        "smallest lowest min minimum least",
+    "count":      "count how-many tally number-of frequency occurrences",
+    "reverse":    "reverse backwards flip invert",
+    "sort":       "sort order arrange rank",
+    "unique":     "unique duplicates dedupe distinct repeated",
+    "filter":     "filter only keep above over below under bigger smaller",
+    "merge":      "merge combine join together",
+    "palindrome": "palindrome same-backwards",
+    "prime":      "prime",
+    "even":       "even odd",
+    "vowels":     "vowels consonants",
+    "length":     "length longest shortest size",
+    "upper":      "capitalise capitalize uppercase upper shout",
+    "lower":      "lowercase lower",
+    "split":      "split separate break-up",
+    "celsius":    "celsius fahrenheit temperature",
+    "fizzbuzz":   "fizzbuzz",
+    "fibonacci":  "fibonacci fib",
+    "search":     "search find-in binary-search lookup index-of",
+    "swap":       "swap shuffle randomise randomize pick random",
+    "read":       "read open load",
+    "write":      "save write-to store",
+    "table":      "times-table multiplication",
+    "factorial":  "factorial",
+    "round":      "round nearest",
+    "percent":    "percent percentage",
+}
+WORD_OP = {w: op for op, words in OPS.items() for w in words.split()}
+
+SUBJECTS = {
+    "list": "list numbers array values items nums scores prices ages",
+    "text": "string text word words sentence name line message",
+    "dict": "dict dictionary map mapping pairs",
+    "file": "file document csv txt",
+}
+WORD_SUBJ = {w: s for s, words in SUBJECTS.items() for w in words.split()}
+
+BODIES = {
+    ("sum", "list"): ("total(numbers)", "    return sum(numbers)",
+                      "adds every number up", "total([1, 2, 3]) -> 6"),
+    ("average", "list"): ("average(numbers)",
+                          "    return sum(numbers) / len(numbers) if numbers else 0.0",
+                          "adds them up and shares the total out evenly",
+                          "average([2, 4]) -> 3.0"),
+    ("max", "list"): ("biggest(numbers, n=1)",
+                      "    return sorted(numbers, reverse=True)[:n]",
+                      "sorts high to low and takes the first n",
+                      "biggest([3, 9, 4], 2) -> [9, 4]"),
+    ("min", "list"): ("smallest(numbers, n=1)",
+                      "    return sorted(numbers)[:n]",
+                      "sorts low to high and takes the first n",
+                      "smallest([3, 9, 4], 2) -> [3, 4]"),
+    ("count", "list"): ("count_each(items)",
+                        "    counts = {}\n"
+                        "    for item in items:\n"
+                        "        counts[item] = counts.get(item, 0) + 1\n"
+                        "    return counts",
+                        "walks the list, adding 1 to each item's tally",
+                        "count_each(['a', 'a', 'b']) -> {'a': 2, 'b': 1}"),
+    ("count", "text"): ("count_words(text)",
+                        "    counts = {}\n"
+                        "    for word in text.lower().split():\n"
+                        "        counts[word] = counts.get(word, 0) + 1\n"
+                        "    return counts",
+                        "splits on spaces, then tallies each word",
+                        "count_words('a a b') -> {'a': 2, 'b': 1}"),
+    ("reverse", "text"): ("reverse(text)", "    return text[::-1]",
+                          "[::-1] walks the letters backwards",
+                          "reverse('funk') -> 'knuf'"),
+    ("reverse", "list"): ("reverse(items)", "    return items[::-1]",
+                          "[::-1] walks the list backwards",
+                          "reverse([1, 2, 3]) -> [3, 2, 1]"),
+    ("sort", "list"): ("sort_items(items, biggest_first=False)",
+                       "    return sorted(items, reverse=biggest_first)",
+                       "sorted() does the work; reverse flips the direction",
+                       "sort_items([3, 1, 2]) -> [1, 2, 3]"),
+    ("sort", "dict"): ("sort_by_value(d, biggest_first=True):".rstrip(":"),
+                       "    return dict(sorted(d.items(), key=lambda kv: kv[1],\n"
+                       "                       reverse=biggest_first))",
+                       "key= says compare the value, not the label",
+                       "sort_by_value({'a': 1, 'b': 9}) -> {'b': 9, 'a': 1}"),
+    ("unique", "list"): ("unique(items)",
+                         "    seen, out = set(), []\n"
+                         "    for item in items:\n"
+                         "        if item not in seen:\n"
+                         "            seen.add(item)\n"
+                         "            out.append(item)\n"
+                         "    return out",
+                         "remembers what it has seen, keeps the first of each",
+                         "unique([1, 2, 1]) -> [1, 2]"),
+    ("filter", "list"): ("keep_over(numbers, limit=0)",
+                         "    return [n for n in numbers if n > limit]",
+                         "keeps only the numbers bigger than the limit",
+                         "keep_over([1, 5, 9], 4) -> [5, 9]"),
+    ("merge", "dict"): ("merge(a, b)", "    return {**a, **b}",
+                        "{**a, **b} copies both in; b wins any clash",
+                        "merge({'x': 1}, {'y': 2}) -> {'x': 1, 'y': 2}"),
+    ("merge", "list"): ("merge(a, b)", "    return list(a) + list(b)",
+                        "sticks the second list onto the end of the first",
+                        "merge([1], [2]) -> [1, 2]"),
+    ("palindrome", "text"): ("is_palindrome(text)",
+                             "    clean = ''.join(c.lower() for c in text if c.isalnum())\n"
+                             "    return clean == clean[::-1]",
+                             "strips punctuation, then checks it reads the same backwards",
+                             "is_palindrome('Racecar') -> True"),
+    ("prime", "list"): ("is_prime(n)",
+                        "    if n < 2:\n        return False\n"
+                        "    for d in range(2, int(n ** 0.5) + 1):\n"
+                        "        if n % d == 0:\n            return False\n"
+                        "    return True",
+                        "tries every divisor up to the square root",
+                        "is_prime(7) -> True"),
+    ("even", "list"): ("evens(numbers)",
+                       "    return [n for n in numbers if n % 2 == 0]",
+                       "% 2 == 0 means it divides by two exactly",
+                       "evens([1, 2, 3, 4]) -> [2, 4]"),
+    ("vowels", "text"): ("count_vowels(text)",
+                         "    return sum(1 for c in text.lower() if c in 'aeiou')",
+                         "counts every letter that is a vowel",
+                         "count_vowels('funk') -> 1"),
+    ("length", "text"): ("longest_word(text)",
+                         "    return max(text.split(), key=len) if text.split() else ''",
+                         "max() with key=len picks the longest",
+                         "longest_word('a funky beat') -> 'funky'"),
+    ("upper", "text"): ("shout(text)", "    return text.upper()",
+                        "upper() makes every letter a capital",
+                        "shout('funk') -> 'FUNK'"),
+    ("lower", "text"): ("quiet(text)", "    return text.lower()",
+                        "lower() makes every letter small",
+                        "quiet('FUNK') -> 'funk'"),
+    ("split", "text"): ("split_text(text, on=' ')",
+                        "    return text.split(on)",
+                        "split() cuts the string wherever it finds the separator",
+                        "split_text('a b') -> ['a', 'b']"),
+    ("celsius", "list"): ("to_fahrenheit(celsius)",
+                          "    return celsius * 9 / 5 + 32",
+                          "the conversion is times 9, divide by 5, add 32",
+                          "to_fahrenheit(100) -> 212.0"),
+    ("search", "list"): ("find_in(items, target)",
+                         "    lo, hi = 0, len(items) - 1\n"
+                         "    while lo <= hi:\n"
+                         "        mid = (lo + hi) // 2\n"
+                         "        if items[mid] == target:\n            return mid\n"
+                         "        if items[mid] < target:\n            lo = mid + 1\n"
+                         "        else:\n            hi = mid - 1\n"
+                         "    return -1",
+                         "halves the search area each guess; the list must be sorted",
+                         "find_in([1, 3, 5], 5) -> 2"),
+    ("swap", "list"): ("pick(items, n=1)",
+                       "    import random\n"
+                       "    return random.sample(list(items), min(n, len(items)))",
+                       "random.sample takes n items without repeating any",
+                       "pick([1, 2, 3], 2) -> [3, 1]"),
+    ("read", "file"): ("read_lines(path)",
+                       "    with open(path, encoding='utf-8') as f:\n"
+                       "        return [line.rstrip() for line in f]",
+                       "`with` closes the file for you when the block ends",
+                       "read_lines('notes.txt') -> ['first line', ...]"),
+    ("table", "list"): ("times_table(n, up_to=12)",
+                        "    return [n * i for i in range(1, up_to + 1)]",
+                        "multiplies n by every number up to up_to",
+                        "times_table(3, 4) -> [3, 6, 9, 12]"),
+    ("factorial", "list"): ("factorial(n)",
+                            "    out = 1\n"
+                            "    for i in range(2, n + 1):\n        out *= i\n"
+                            "    return out",
+                            "multiplies every number from 2 up to n",
+                            "factorial(5) -> 120"),
+    ("round", "list"): ("round_all(numbers, places=0)",
+                        "    return [round(n, places) for n in numbers]",
+                        "round() to the number of decimal places you want",
+                        "round_all([1.26, 3.5], 1) -> [1.3, 3.5]"),
+    ("percent", "list"): ("percent(part, whole)",
+                          "    return part / whole * 100 if whole else 0.0",
+                          "divide the part by the whole, times 100",
+                          "percent(3, 4) -> 75.0"),
+    ("fizzbuzz", "list"): ("fizzbuzz(n=100)",
+                           "    for i in range(1, n + 1):\n"
+                           "        out = ('Fizz' if i % 3 == 0 else '')"
+                           " + ('Buzz' if i % 5 == 0 else '')\n"
+                           "        print(out or i)",
+                           "divisible by 3 is Fizz, by 5 is Buzz, by both is FizzBuzz",
+                           "fizzbuzz(5) prints 1 2 Fizz 4 Buzz"),
+    ("fibonacci", "list"): ("fib(n)",
+                            "    a, b, out = 0, 1, []\n"
+                            "    for _ in range(n):\n"
+                            "        out.append(a)\n"
+                            "        a, b = b, a + b\n"
+                            "    return out",
+                            "each number is the two before it added together",
+                            "fib(6) -> [0, 1, 1, 2, 3, 5]"),
+}
+
+
+def compose_code(request):
+    """Read the request and build the function. -> (code, matched)."""
+    import re as _re
+    words = _re.findall(r"[a-z']+", request.lower())
+    joined = " " + " ".join(words) + " "
+
+    op = None
+    for w in words:                       # single words
+        if w in WORD_OP:
+            op = WORD_OP[w]
+            break
+    if op is None:                        # then two-word phrases like "how many"
+        for phrase, found in WORD_OP.items():
+            if "-" in phrase and phrase.replace("-", " ") in joined:
+                op = found
+                break
+    subj = next((WORD_SUBJ[w] for w in words if w in WORD_SUBJ), None)
+
+    if op is None:
+        return None, False
+    if subj is None or (op, subj) not in BODIES:
+        subj = next((s for (o, s) in BODIES if o == op), None)
+    if subj is None:
+        return None, False
+
+    sig, body, why, example = BODIES[(op, subj)]
+    n = _re.search(r"\b(\d+)\b", request)
+    if n and "n=1" in sig:                # "top 3" fills the number in
+        example = example.replace(", 2)", f", {n.group(1)})")
+        sig = sig.replace("n=1", f"n={n.group(1)}")
+
+    lines = [f"# {why}.", f"# {example}", f"def {sig}:", body, "",
+             'if __name__ == "__main__":',
+             f"    print({example.split(' ->')[0].split(' prints')[0]})"]
+    return "\n".join(lines), True
+
+
 def write_code(request, adapt=False):
     """-> (code, matched). adapt=True renames it to what you asked for."""
     import re as _re
     t = request.lower()
     want = _re.search(r"(?:called|named)\s+([a-z_][a-z0-9_]*)", t)
+    built, ok = compose_code(request)     # build it from parts first
+    if ok:
+        if adapt and want:
+            first = _re.search(r"def ([a-z_][a-z0-9_]*)", built)
+            if first:
+                built = built.replace(first.group(1), want.group(1))
+        return built, True
     # A vague word counts only when the request is vague too.
     weak = {"class", "sort", "board", "find", "make", "read", "swap"}
     for keys, code in SNIPPETS:
@@ -811,7 +1062,8 @@ WORDS = {
                 " algorithm reverse flip backwards sort order count tally"
                 " average prime factors fibonacci fizzbuzz merge combine"
                 " remove duplicate tidy convert calculate palindrome list"
-                " dict string number numbers json",
+                " dict string number numbers json skeleton stub engine"
+                " chess bot game app website server parser",
 }
 BAGS = {k: set(v.split()) - STOP for k, v in WORDS.items()}
 SPREAD = {}
@@ -864,8 +1116,18 @@ def detect_intent(text):
         scores["greet"] = 0        # "yo make me a beat" is a beat, not a hello
     if _re_ask.match(t) and not scores["music"]:
         scores["code"] += 2
+    # "write a chess engine that beats stockfish" is code, however many
+    # music-ish words happen to be in it
+    if words & {"write", "code", "function", "engine", "script", "program",
+                "class", "app", "bot"}:
+        scores["code"] += 2.5
     if words & {"average", "flip", "backwards", "divisible", "factors"}:
         scores["code"] += 1.5
+    # If the generator can actually build it, it's a code request — the
+    # router shouldn't need its own vocabulary for something we can do.
+    if scores["music"] < 1.0 and compose_code(text)[1]:
+        scores["code"] += 3
+
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     top, second = ranked[0], ranked[1]
     if top[1] < 0.5:
@@ -1479,6 +1741,13 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
 
     elif intent == "code":
         prompt = text
+        if text.strip().lower() in ("skeleton", "stub", "blank"):
+            code, _ = write_code(ses.last.get("asked", "do_thing"))
+            out["code"] = code
+            out["reply"] = "Here's the shape. Fill in the middle."
+            ses.last["code"] = code
+            return out
+        ses.last["asked"] = text
         for p in ("finish this code:", "write me a", "write a", "code for", "code:"):
             if p in prompt.lower():
                 prompt = prompt[prompt.lower().index(p) + len(p):]
@@ -1501,8 +1770,30 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                 head += "\n" + out["checked"]
             out["reply"] = (head + "\n" + "\n".join(why)
                             if why and "explain" in spec["can"] else head)
+            # A six-line snippet is not "a chess engine that beats Stockfish".
+            # If they asked for something big, say what this actually is.
+            big = {"engine", "app", "website", "game", "bot", "server", "full",
+                   "complete", "whole", "beats", "clone", "system", "ai"}
+            if set(prompt.lower().replace(",", " ").split()) & big:
+                out["reply"] += ("\n\nStraight with you: that's a small piece, "
+                                 "not the whole thing you asked for. I only "
+                                 "know a handful of shapes by heart — with "
+                                 "Ollama running I could write the real one.")
         else:
-            out["reply"] = "No rule for that — here's a skeleton."
+            # Say plainly that this one is beyond it. A skeleton dressed up as
+            # an answer wastes the person's time; the truth costs nothing.
+            known = ", ".join(sorted(OPS)[:12])
+            if llm_available():
+                out["reply"] = ("I couldn't get that one right. Here's a "
+                                "starting point, but check it.")
+            else:
+                out.pop("code", None)
+                out["reply"] = (
+                    f"I can't build that one. Without a model running I work "
+                    f"from {len(OPS)} operations I can assemble: {known}...\n"
+                    f"For anything else, start Ollama on this machine "
+                    f"(ollama run llama3.2) and I'll actually write it. "
+                    f"Say 'skeleton' if you want a blank function to fill in.")
 
     else:
         able = [c for c in ("music", "code", "search") if c in spec["can"]]
