@@ -429,7 +429,9 @@ cursor:pointer;font:inherit}
     <input id="acct" placeholder="account">
     <span class="tag" id="blurb"></span>
   </header>
-  <div id="feed"></div>
+  <div id="train" style="display:none;border-bottom:1px solid #1a2531;
+padding:8px 18px;font-size:12px;color:#8ea4b8"></div>
+<div id="feed"></div>
   <footer>
     <div class="bar">
       <textarea id="msg" placeholder="Ask Nova..."></textarea>
@@ -528,6 +530,20 @@ if(last){cur.turns=cur.turns.slice(0,cur.turns.indexOf(t));drawFeed();
 send(last.text);}};
 a.appendChild(cp);a.appendChild(rg);b.appendChild(a);
 }
+
+async function poll(){
+try{
+const d=await(await fetch('/training')).json();
+if(!d.running&&!d.step){$('train').style.display='none';return;}
+const bar='#'.repeat(Math.round(d.percent/5))+'.'.repeat(20-Math.round(d.percent/5));
+$('train').style.display='block';
+$('train').textContent=`val ${d.val} [${bar}] ${d.percent}% `+
+`· step ${d.step.toLocaleString()}/${d.target.toLocaleString()} `+
+`· understanding ${d.understanding}/10 chat ${d.chat}/10 code ${d.code}/10`+
+(d.eta?` · ${d.eta} left`:'');
+}catch(e){}
+}
+setInterval(poll,5000);poll();
 
 async function boot(){
 newChat();                      // exists before any fetch can fail
@@ -1466,10 +1482,18 @@ class SkillTrainer:
         self.rng = np.random.default_rng()
         self._stop = threading.Event()
         self.thread = None
+        # One "pass" is the model seeing the whole corpus once. Three passes
+        # is a sensible target: enough to learn, not so much it memorises.
+        per_step = self.batch * BIG_BLOCK
+        self.passes = env("NOVA_PASSES", 3, int)
+        self.target = env("NOVA_TARGET", 0, int) or max(
+            1000, int(self.passes * len(ids) / per_step))
         self.state = {"step": 0, "loss": None, "val": None, "best": None,
                       "params": self.model.n_params(), "tokens": int(len(ids)),
                       "chat": 0, "code": 0, "started": 0, "mins": 0.0,
-                      "sample": "", "history": []}
+                      "sample": "", "history": [], "target": self.target,
+                      "per_step": per_step, "passes": self.passes,
+                      "percent": 0.0, "seen": 0, "eta": ""}
         if os.path.exists(SKILL_CKPT):
             try:
                 extra = self.model.load(SKILL_CKPT)
@@ -1533,6 +1557,9 @@ class SkillTrainer:
         self.opt.step(self.model.p, self.model.backward(cache))
         self.state["step"] += 1
         self.state["loss"] = round(loss, 3)
+        self.state["seen"] = self.state["step"] * self.state["per_step"]
+        self.state["percent"] = round(
+            100 * self.state["step"] / max(1, self.target), 1)
         return loss
 
     def save(self):
@@ -1544,6 +1571,7 @@ class SkillTrainer:
     def _loop(self):
         t0 = time.time()
         self.state["started"] = t0
+        self.score()          # so the display has real numbers straight away
         while not self._stop.is_set():
             for _ in range(20):
                 self.step_once()
@@ -3430,25 +3458,39 @@ def cli():
 
     if args.command == "train-skill":
         st = SkillTrainer(verbose=True)
-        print(f"{st.state['params']:,} parameters | {st.state['tokens']:,} tokens"
-              f" | {len(st.tok)} vocab")
-        print("training. ctrl-c to stop; it saves as it goes.\n")
-        t0 = time.time()
+        d = st.state
+        print(f"{d['params']:,} parameters | {d['tokens']:,} tokens | "
+              f"vocab {len(st.tok)}")
+        print(f"target: {st.target:,} steps = {st.passes} passes over the "
+              f"corpus ({d['per_step']:,} tokens a step)")
+        print("ctrl-c to stop; it saves as it goes and picks up where it left "
+              "off.\n")
+        t0, done0 = time.time(), d["step"]
         try:
-            while True:
+            while d["step"] < st.target:
                 for _ in range(20):
                     st.step_once()
-                if st.state["step"] % 200 < 20:
+                if d["step"] % 200 < 20:
                     u, c, k = st.score()
                     st.save()
-                    print(f"step {st.state['step']:6d} | "
-                          f"{(time.time()-t0)/60:5.1f} min | "
-                          f"loss {st.state['loss']:.3f} | "
-                          f"understanding {u}/10 chat {c}/10 code {k}/10")
-                    print(f"    says: {st.state['sample']!r}")
+                    elapsed = time.time() - t0
+                    rate = (d["step"] - done0) / max(elapsed, 1e-9)
+                    left = (st.target - d["step"]) / rate if rate else 0
+                    d["eta"] = (f"{left/3600:.1f}h" if left > 3600
+                                else f"{left/60:.0f}m")
+                    bar = int(d["percent"] / 5)
+                    print(f"val {d['val']:.3f}  loss {d['loss']:.3f}  "
+                          f"[{'#' * bar}{'.' * (20 - bar)}] "
+                          f"{d['percent']:.1f}%  step {d['step']:,}/"
+                          f"{st.target:,}  {elapsed/60:.0f}m in, {d['eta']} left")
+                    print(f"    understanding {u}/10   chat {c}/10   "
+                          f"code {k}/10   pass "
+                          f"{d['seen']/max(1, d['tokens']):.2f} of {st.passes}")
+                    print(f"    says: {d['sample']!r}\n")
+            print("done — that's the full target.")
         except KeyboardInterrupt:
             st.save()
-            print(f"\nsaved at step {st.state['step']}")
+            print(f"\nsaved at step {d['step']:,} ({d['percent']:.1f}% of target)")
         return
 
     if args.command == "search":
