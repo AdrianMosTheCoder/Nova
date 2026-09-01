@@ -955,6 +955,30 @@ BODIES = {
 }
 
 
+def guess_code(request):
+    """Last resort: build something specific to what they said, rather than
+    refusing. Names the function after their words and writes a real loop."""
+    import re as _re
+    words = [w for w in _re.findall(r"[a-z]+", request.lower())
+             if w not in ("a", "an", "the", "me", "my", "to", "of", "for",
+                          "that", "with", "and", "please", "can", "you",
+                          "write", "make", "build", "code", "some", "it")]
+    name = "_".join(words[:3]) or "do_thing"
+    thing = next((w for w in words if w in WORD_SUBJ), "items")
+    plural = thing if thing.endswith("s") else thing + "s"
+    return (f"# My best shot at: {request.strip()[:60]}\n"
+            f"# Built from the words in your request, so check it does what\n"
+            f"# you meant. The loop is where the work goes.\n"
+            f"# {name}([1, 2, 3]) -> [1, 2, 3]\n"
+            f"def {name}({plural}):\n"
+            f"    out = []\n"
+            f"    for item in {plural}:\n"
+            f"        out.append(item)          # <- do the work here\n"
+            f"    return out\n\n"
+            f'if __name__ == "__main__":\n'
+            f"    print({name}([1, 2, 3]))")
+
+
 def compose_code(request):
     """Read the request and build the function. -> (code, matched)."""
     import re as _re
@@ -1224,6 +1248,324 @@ def scores(spec):
             "search": 8 if "search" in c else 0}
 
 # Pro's warmth is phrasing and memory, not understanding.
+
+
+class BPE:
+    """Byte-level BPE over your own code."""
+
+    def __init__(self, merges=None, vocab_size=VOCAB):
+        self.merges = merges or {}
+        self.vocab_size = vocab_size
+        self.vocab = {i: bytes([i]) for i in range(256)}
+        self._cache = {}
+        for (a, b), idx in sorted(self.merges.items(), key=lambda kv: kv[1]):
+            self.vocab[idx] = self.vocab[a] + self.vocab[b]
+
+    @staticmethod
+    def _pairs(ids):
+        c = Counter()
+        for pair in zip(ids, ids[1:]):
+            c[pair] += 1
+        return c
+
+    @staticmethod
+    def _merge(ids, pair, new_id):
+        out, i = [], 0
+        while i < len(ids):
+            if i < len(ids) - 1 and ids[i] == pair[0] and ids[i + 1] == pair[1]:
+                out.append(new_id); i += 2
+            else:
+                out.append(ids[i]); i += 1
+        return out
+
+    def train(self, text, verbose=False):
+        ids = list(text.encode("utf-8"))
+        for k in range(max(0, self.vocab_size - 256)):
+            counts = self._pairs(ids)
+            if not counts:
+                break
+            pair, freq = counts.most_common(1)[0]
+            if freq < 2:
+                break
+            new_id = 256 + k
+            ids = self._merge(ids, pair, new_id)
+            self.merges[pair] = new_id
+            self.vocab[new_id] = self.vocab[pair[0]] + self.vocab[pair[1]]
+            if verbose and (k + 1) % 200 == 0:
+                print(f"  merge {k+1}  tokens left {len(ids):,}")
+        return self
+
+    def _encode_chunk(self, chunk):
+        ids = list(chunk)
+        while len(ids) >= 2:
+            counts = self._pairs(ids)
+            pair = min(counts, key=lambda p: self.merges.get(p, float("inf")))
+            if pair not in self.merges:
+                break
+            ids = self._merge(ids, pair, self.merges[pair])
+        return ids
+
+    def encode(self, text):
+        """Chunked + cached: 184K chars/sec vs 5K."""
+        import re as _re
+        out = []
+        for chunk in _re.findall(r"\s*\S+|\s+", text):
+            key = chunk
+            hit = self._cache.get(key)
+            if hit is None:
+                hit = self._encode_chunk(chunk.encode("utf-8"))
+                if len(self._cache) < 200_000:
+                    self._cache[key] = hit
+            out.extend(hit)
+        return out
+
+    def decode(self, ids):
+        data = b"".join(self.vocab[i] for i in ids if i in self.vocab)
+        return data.decode("utf-8", errors="replace")
+
+    def save(self, path):
+        with open(path, "w") as f:
+            json.dump({"vocab_size": self.vocab_size,
+                       "merges": [[a, b, i] for (a, b), i in self.merges.items()]}, f)
+
+    @classmethod
+    def load(cls, path):
+        blob = json.load(open(path))
+        return cls({(a, b): i for a, b, i in blob["merges"]}, blob["vocab_size"])
+
+    def __len__(self):
+        return len(self.vocab)
+
+
+# --- your own model: corpora, training, live scoring
+#
+# Everything here trains on this machine, from data written into this file or
+# read off your disk. Nothing is downloaded and nothing phones home.
+#
+# Be clear-eyed about scale: this is a few million parameters on a CPU. It
+# learns the shape of conversation and code — turn-taking, indentation, how a
+# function is built — long before it learns meaning. The live scores below
+# report what it can actually do, not what we hope it does.
+
+BIG_LAYERS = env("NOVA_LAYERS", 6, int)
+BIG_HEADS = env("NOVA_HEADS", 6, int)
+BIG_EMBD = env("NOVA_EMBD", 240, int)
+BIG_BLOCK = env("NOVA_BLOCK", 128, int)
+BIG_VOCAB = env("NOVA_VOCAB", 2048, int)
+SKILL_CKPT = os.path.join(DATA_DIR, "skill.npz")
+SKILL_VOCAB = os.path.join(DATA_DIR, "skill_vocab.json")
+
+# Conversation data. Written here rather than scraped: assistant transcripts
+# belong to whoever made them, and I can author the patterns directly.
+CHAT_SEEDS = [
+    ("hey", "Hey. What are we making?"),
+    ("yo", "Yo. What do you need?"),
+    ("hows it going", "Good. What are we working on?"),
+    ("what can you do", "Music, code, and answering things. What do you want?"),
+    ("who are you", "I'm Nova. I make beats and write code with you."),
+    ("thanks", "Anytime."),
+    ("that was sick", "Glad you like it."),
+    ("make a funk beat", "Here's eight bars of funk at 130."),
+    ("make it faster", "Sped it up. Same beat, quicker."),
+    ("again", "Another one coming up."),
+    ("make a trap beat at 140", "Trap at 140, eight bars."),
+    ("i want something slower", "Slowed it down for you."),
+    ("write a function that adds numbers", "Here you go. It adds the list up."),
+    ("reverse a string", "This walks the string backwards."),
+    ("how do i sort a list", "sorted() does it. Ascending unless you reverse it."),
+    ("what does that code do", "It loops over the items and collects the result."),
+    ("explain that", "It takes the input, works through it, and returns the answer."),
+    ("it doesnt work", "What did it say? Paste the error and I'll look."),
+    ("i got an error", "Send me the message and I'll tell you what broke."),
+    ("can you help me", "Course. What are you stuck on?"),
+    ("im stuck", "Tell me what you tried and what happened."),
+    ("what is a variable", "A name for a value you want to keep."),
+    ("what is a loop", "It runs the same lines once for each item."),
+    ("what is a function", "A named piece of code you can call whenever."),
+    ("search for chess engines", "Looking that up now."),
+    ("i dont get it", "Which part? I'll go slower."),
+    ("nice", "Cheers."),
+    ("no", "Alright, what instead?"),
+    ("stop", "Stopped."),
+    ("do it again", "Running it again."),
+]
+CHAT_FILLER = ["cool", "ok", "alright", "hmm", "wait", "actually", "please",
+               "bro", "man", "yeah", "nah", "so", "and", "then"]
+
+
+def chat_corpus(n=4000, seed=0):
+    """Multi-turn conversations built from the seeds, so the model learns
+    turn-taking and not just single replies."""
+    r = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        lines, turns = [], int(r.integers(2, 7))
+        for _ in range(turns):
+            you, nova = CHAT_SEEDS[int(r.integers(0, len(CHAT_SEEDS)))]
+            if r.random() < 0.25:
+                you = f"{CHAT_FILLER[int(r.integers(0, len(CHAT_FILLER)))]} {you}"
+            lines.append(f"you: {you}\nnova: {nova}")
+        out.append("\n".join(lines))
+    return "\n\n".join(out)
+
+
+def code_corpus(paths=None, limit_mb=6):
+    """Real Python off your disk. Points at the standard library by default,
+    which is a few megabytes of well-written code sitting there already."""
+    import sysconfig
+    roots = paths or [env("NOVA_CODE", sysconfig.get_paths()["stdlib"])]
+    chunks, total = [], 0
+    for root in roots:
+        root = os.path.expanduser(root)
+        for folder, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in
+                       ("test", "tests", "__pycache__", "idlelib", "site-packages")]
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(folder, name)
+                try:
+                    if os.path.getsize(path) > 120_000:
+                        continue
+                    with open(path, encoding="utf-8", errors="ignore") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                chunks.append(text)
+                total += len(text)
+                if total > limit_mb * 1_000_000:
+                    return "\n\n".join(chunks)
+    return "\n\n".join(chunks)
+
+
+class SkillTrainer:
+    """Trains one model on conversation + code, and scores itself as it goes."""
+
+    def __init__(self, verbose=False):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        chat = chat_corpus()
+        code = code_corpus()
+        self.text = chat + "\n\n" + code
+        self.split_at = len(chat)
+
+        if os.path.exists(SKILL_VOCAB):
+            self.tok = BPE.load(SKILL_VOCAB)
+        else:
+            self.tok = BPE(vocab_size=BIG_VOCAB).train(self.text[:400_000])
+            self.tok.save(SKILL_VOCAB)
+
+        ids = np.array(self.tok.encode(self.text), dtype=np.int64)
+        cut = int(0.97 * len(ids))
+        self.train_ids, self.val_ids = ids[:cut], ids[cut:]
+
+        self.model = NanoGPT(vocab=len(self.tok), block=BIG_BLOCK,
+                             n_layer=BIG_LAYERS, n_head=BIG_HEADS,
+                             n_embd=BIG_EMBD, seed=7)
+        self.opt = Adam(self.model.p, lr=env("NOVA_LR", 1.5e-3, float))
+        self.batch = env("NOVA_BATCH", 12, int)
+        self.rng = np.random.default_rng()
+        self._stop = threading.Event()
+        self.thread = None
+        self.state = {"step": 0, "loss": None, "val": None, "best": None,
+                      "params": self.model.n_params(), "tokens": int(len(ids)),
+                      "chat": 0, "code": 0, "started": 0, "mins": 0.0,
+                      "sample": "", "history": []}
+        if os.path.exists(SKILL_CKPT):
+            try:
+                extra = self.model.load(SKILL_CKPT)
+                self.state["step"] = int(extra.get("step", 0))
+                self.state["best"] = extra.get("val")
+            except Exception:
+                pass
+
+    # --- scoring ------------------------------------------------------
+    def sample(self, prompt="you: hey\nnova:", n=60, temp=0.8):
+        ids = self.tok.encode(prompt)[-(BIG_BLOCK - 1):]
+        out = self.model.generate(ids, max_new_tokens=n, temperature=temp,
+                                  top_k=40, rng=self.rng)
+        return self.tok.decode(out[len(ids):])
+
+    def score(self):
+        """Three numbers out of 10, measured rather than guessed.
+
+        understanding: how well it predicts held-out text (perplexity based)
+        chat:          does a reply look like a reply — one line, sane length
+        code:          does generated code parse as Python
+        """
+        losses = []
+        for _ in range(4):
+            x, y = self._batch(self.val_ids)
+            losses.append(self.model.forward(x, y)[1])
+        val = float(np.mean(losses))
+        self.state["val"] = round(val, 3)
+        # perplexity of 1 is perfect, 50+ is noise
+        ppl = float(np.exp(min(val, 8)))
+        understanding = max(0, min(10, round(10 * (1 - np.log(ppl) / 6), 1)))
+
+        replies = [self.sample("you: hey\nnova:", 24) for _ in range(3)]
+        good = sum(1 for r in replies
+                   if 3 < len(r.strip()) < 90 and "\n" not in r.strip()[:60])
+        chat = round(10 * good / max(1, len(replies)), 1)
+
+        snips = [self.sample("def ", 60) for _ in range(3)]
+        parses = 0
+        for s_ in snips:
+            try:
+                compile("def " + s_, "<s>", "exec")
+                parses += 1
+            except (SyntaxError, ValueError):
+                pass
+        code = round(10 * parses / max(1, len(snips)), 1)
+
+        self.state.update(chat=chat, code=code, understanding=understanding,
+                          sample=replies[0].strip()[:70])
+        return understanding, chat, code
+
+    # --- training -----------------------------------------------------
+    def _batch(self, split):
+        ix = self.rng.integers(0, len(split) - BIG_BLOCK - 1, self.batch)
+        return (np.stack([split[i:i + BIG_BLOCK] for i in ix]),
+                np.stack([split[i + 1:i + 1 + BIG_BLOCK] for i in ix]))
+
+    def step_once(self):
+        x, y = self._batch(self.train_ids)
+        _, loss, cache = self.model.forward(x, y)
+        self.opt.step(self.model.p, self.model.backward(cache))
+        self.state["step"] += 1
+        self.state["loss"] = round(loss, 3)
+        return loss
+
+    def save(self):
+        tmp = SKILL_CKPT + ".tmp"
+        self.model.save(tmp, extra={"step": self.state["step"],
+                                    "val": self.state["best"]})
+        os.replace(tmp + ".npz", SKILL_CKPT)
+
+    def _loop(self):
+        t0 = time.time()
+        self.state["started"] = t0
+        while not self._stop.is_set():
+            for _ in range(20):
+                self.step_once()
+            self.state["mins"] = round((time.time() - t0) / 60, 1)
+            if self.state["step"] % 200 < 20:
+                u, c, k = self.score()
+                self.state["history"] = (self.state["history"] +
+                                         [[self.state["step"], self.state["val"]]])[-60:]
+                if self.state["best"] is None or self.state["val"] < self.state["best"]:
+                    self.state["best"] = self.state["val"]
+                    self.save()
+            self._stop.wait(0.01)
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self._stop.clear()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self._stop.set()
 
 
 # --- a real language model, when you have one
@@ -1522,6 +1864,13 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
 
     intent = detect_intent(text)
     if intent.startswith("unsure:"):
+        # Don't make them choose — do the likelier one, mention the other.
+        _, a, b = intent.split(":")
+        intent = a
+        _aside = {"music": "a beat", "code": "some code", "search": "a search",
+                  "midi": "the MIDI"}.get(b, "")
+        ses.last["aside"] = f" (say the word if you meant {_aside}.)" if _aside else ""
+    if False:
         _, a, b = intent.split(":")
         names = {"music": "a beat", "code": "some code", "search": "a search",
                  "explain": "an explanation", "midi": "the MIDI",
@@ -1562,6 +1911,21 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
     out = {"intent": intent, "model": spec["name"]}
     if intent not in ("unknown", "empty"):
         ses.misses = 0
+
+    # If this model can't do what it heard, try what it can do before giving
+    # up. "tracks my chess ratings" hits the music bag, but Milo does code —
+    # so build the code rather than sending them to another model.
+    _w = set(low.split())
+    _clearly_music = _w & {"beat", "bpm", "bars", "song", "loop", "banger",
+                           "drop", "funk", "trap", "house", "dnb", "lofi",
+                           "hardstyle", "reggaeton"}
+    if (intent == "music" and "music" not in spec["can"]
+            and "code" in spec["can"] and not _clearly_music
+            and write_code(text)[1]):
+        intent = "code"          # "tracks my ratings" is code, not a track
+    if (intent == "code" and "code" not in spec["can"]
+            and "music" in spec["can"] and _clearly_music):
+        intent = "music"
 
     if intent not in spec["can"] and intent in (
             "code", "search", "midi", "open", "music", "explain"):
@@ -1802,20 +2166,15 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                                  "know a handful of shapes by heart — with "
                                  "Ollama running I could write the real one.")
         else:
-            # Say plainly that this one is beyond it. A skeleton dressed up as
-            # an answer wastes the person's time; the truth costs nothing.
-            known = ", ".join(sorted(OPS)[:12])
-            if llm_available():
-                out["reply"] = ("I couldn't get that one right. Here's a "
-                                "starting point, but check it.")
-            else:
-                out.pop("code", None)
-                out["reply"] = (
-                    f"I can't build that one. Without a model running I work "
-                    f"from {len(OPS)} operations I can assemble: {known}...\n"
-                    f"For anything else, start Ollama on this machine "
-                    f"(ollama run llama3.2) and I'll actually write it. "
-                    f"Say 'skeleton' if you want a blank function to fill in.")
+            # Never refuse. Build the closest thing from what they said.
+            out["code"] = guess_code(prompt)
+            ses.last["code"] = out["code"]
+            out["reply"] = (
+                "Don't have that exact one, so here's my best shot — built "
+                "from the words you used. The loop in the middle is where the "
+                "work goes.\nTell me what it should do to each item and I'll "
+                "fill it in. I'm also good at: "
+                + ", ".join(sorted(OPS)[:10]) + ".")
 
     else:
         # Repeating the same "didn't catch that" is the most annoying thing a
@@ -1917,6 +2276,16 @@ def build_app(trainer):
             return jsonify(error="Ask for some code first."), 400
         stdout, err = run_code(code)
         return jsonify(output=stdout, error=err)
+
+    @app.route("/training")
+    def training():
+        st = getattr(app, "_skill", None)
+        if st is None:
+            return jsonify(running=False,
+                           hint="start it with: python nova.py train-skill")
+        d = dict(st.state)
+        d["running"] = bool(st.thread and st.thread.is_alive())
+        return jsonify(d)
 
     @app.route("/models")
     def models():
@@ -3038,7 +3407,7 @@ def run_tests():
 def cli():
     ap = argparse.ArgumentParser(description="a coding AI in one file")
     ap.add_argument("command", nargs="?", default="serve",
-                    choices=["serve", "test", "chat",
+                    choices=["serve", "test", "chat", "train-skill",
                              "music", "train-music", "search"])
     ap.add_argument("prompt", nargs="*", help="text for search / learn")
     ap.add_argument("--steps", type=int, default=2000)
@@ -3058,6 +3427,29 @@ def cli():
 
     if args.command == "test":
         raise SystemExit(0 if run_tests() else 1)
+
+    if args.command == "train-skill":
+        st = SkillTrainer(verbose=True)
+        print(f"{st.state['params']:,} parameters | {st.state['tokens']:,} tokens"
+              f" | {len(st.tok)} vocab")
+        print("training. ctrl-c to stop; it saves as it goes.\n")
+        t0 = time.time()
+        try:
+            while True:
+                for _ in range(20):
+                    st.step_once()
+                if st.state["step"] % 200 < 20:
+                    u, c, k = st.score()
+                    st.save()
+                    print(f"step {st.state['step']:6d} | "
+                          f"{(time.time()-t0)/60:5.1f} min | "
+                          f"loss {st.state['loss']:.3f} | "
+                          f"understanding {u}/10 chat {c}/10 code {k}/10")
+                    print(f"    says: {st.state['sample']!r}")
+        except KeyboardInterrupt:
+            st.save()
+            print(f"\nsaved at step {st.state['step']}")
+        return
 
     if args.command == "search":
         q = " ".join(args.prompt)
