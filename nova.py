@@ -619,6 +619,10 @@ MODELS = {
                      "blurb": "7 genres, stereo, folk, 32-bar tracks."},
     "milo-1.8":     {"name": "Milo 1.8", "can": TALK + ["explain"], "warm": True,
                      "blurb": "Code that explains itself, plus search."},
+    "nova-mine":    {"name": "Nova (mine)", "warm": True, "mine": True,
+                     "can": DEEP + TALK + ["open", "compose", "explain"],
+                     "blurb": "Replies written by the model you're training. "
+                              "Rough until the loss comes down."},
     "luca":         {"name": "Luca", "warm": True,
                      "can": DEEP + TALK + ["open", "compose", "explain",
                                            "deep", "fix"],
@@ -1363,9 +1367,12 @@ class BPE:
 # function is built — long before it learns meaning. The live scores below
 # report what it can actually do, not what we hope it does.
 
-BIG_LAYERS = env("NOVA_LAYERS", 6, int)
-BIG_HEADS = env("NOVA_HEADS", 6, int)
-BIG_EMBD = env("NOVA_EMBD", 240, int)
+# 8 x 384 comes to 15M parameters. Roughly 3x the compute of the 4.7M one,
+# so expect about 3x the wall-clock for the same number of steps — worth it,
+# since 4.7M was never going to hold a sentence together.
+BIG_LAYERS = env("NOVA_LAYERS", 8, int)
+BIG_HEADS = env("NOVA_HEADS", 8, int)
+BIG_EMBD = env("NOVA_EMBD", 384, int)
 BIG_BLOCK = env("NOVA_BLOCK", 128, int)
 BIG_VOCAB = env("NOVA_VOCAB", 2048, int)
 SKILL_CKPT = os.path.join(DATA_DIR, "skill.npz")
@@ -1409,7 +1416,7 @@ CHAT_FILLER = ["cool", "ok", "alright", "hmm", "wait", "actually", "please",
                "bro", "man", "yeah", "nah", "so", "and", "then"]
 
 
-def chat_corpus(n=4000, seed=0):
+def chat_corpus(n=env("NOVA_CHATS", 9000, int), seed=0):
     """Multi-turn conversations built from the seeds, so the model learns
     turn-taking and not just single replies."""
     r = np.random.default_rng(seed)
@@ -1425,11 +1432,13 @@ def chat_corpus(n=4000, seed=0):
     return "\n\n".join(out)
 
 
-def code_corpus(paths=None, limit_mb=6):
-    """Real Python off your disk. Points at the standard library by default,
-    which is a few megabytes of well-written code sitting there already."""
+def code_corpus(paths=None, limit_mb=env("NOVA_CODE_MB", 14, int)):
+    """Real Python off your disk. The standard library by default; add your
+    own projects with NOVA_CODE=/path/one:/path/two — your code is the best
+    data here, since it's what you actually want it to sound like."""
     import sysconfig
-    roots = paths or [env("NOVA_CODE", sysconfig.get_paths()["stdlib"])]
+    roots = paths or env("NOVA_CODE",
+                         sysconfig.get_paths()["stdlib"]).split(":")
     chunks, total = [], 0
     for root in roots:
         root = os.path.expanduser(root)
@@ -1477,7 +1486,7 @@ class SkillTrainer:
         self.model = NanoGPT(vocab=len(self.tok), block=BIG_BLOCK,
                              n_layer=BIG_LAYERS, n_head=BIG_HEADS,
                              n_embd=BIG_EMBD, seed=7)
-        self.opt = Adam(self.model.p, lr=env("NOVA_LR", 1.5e-3, float))
+        self.opt = Adam(self.model.p, lr=env("NOVA_LR", 8e-4, float))
         self.batch = env("NOVA_BATCH", 12, int)
         self.rng = np.random.default_rng()
         self._stop = threading.Event()
@@ -1499,8 +1508,14 @@ class SkillTrainer:
                 extra = self.model.load(SKILL_CKPT)
                 self.state["step"] = int(extra.get("step", 0))
                 self.state["best"] = extra.get("val")
-            except Exception:
-                pass
+                self.state["val"] = extra.get("val")
+                self.state["seen"] = self.state["step"] * per_step
+                self.state["percent"] = round(
+                    100 * self.state["step"] / max(1, self.target), 1)
+            except Exception as e:
+                self.state["note"] = (f"previous checkpoint was a different "
+                                      f"size ({type(e).__name__}) — starting "
+                                      f"this one from scratch")
 
     # --- scoring ------------------------------------------------------
     def sample(self, prompt="you: hey\nnova:", n=60, temp=0.8):
@@ -1594,6 +1609,18 @@ class SkillTrainer:
 
     def stop(self):
         self._stop.set()
+
+
+def skill_reply(text, st, temp=0.8):
+    """Let your own trained model write the reply. It's whatever the training
+    has made it so far — gibberish early, words later. No templates."""
+    prompt = f"you: {text.strip()}\nnova:"
+    raw = st.sample(prompt, n=48, temp=temp)
+    line = raw.split("\n")[0].strip()
+    for stop in ("you:", "nova:"):
+        if stop in line:
+            line = line.split(stop)[0].strip()
+    return line[:160]
 
 
 # --- a real language model, when you have one
@@ -1883,6 +1910,30 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
     _m = _re2.search(r"(?:i'?m|my name is|call me)\s+([a-z]{2,15})", text.lower())
     if _m and _m.group(1) not in ("looking", "trying", "going", "not", "just"):
         ses.name = _m.group(1).capitalize()
+
+    # Your own trained model writes the words. The tools still do the work,
+    # so a rough model still gets you a real beat — it just describes it in
+    # its own voice, however good that voice currently is.
+    if spec.get("mine") and getattr(milo_reply, "skill", None):
+        st = milo_reply.skill
+        said = skill_reply(text, st)
+        intent = detect_intent(text)
+        out = {"intent": intent, "model": spec["name"],
+               "reply": said or "...",
+               "trained": f"val {st.state.get('val')} · "
+                          f"{st.state.get('percent', 0)}% trained"}
+        if intent == "music" and trainer.music:
+            genre = next((g for g in GENRES if g in low), "funk")
+            wav, tokens = trainer.music.compose(
+                bars=8, genre=genre, arrange="arrange" in spec["can"],
+                stereo="stereo" in spec["can"])
+            ses.last.update(wav=wav, tokens=tokens, genre=genre)
+            out["audio_url"] = f"/audio?session={ses.key}&t={int(time.time())}"
+        elif intent == "code":
+            code, _ = write_code(text, adapt=True)
+            out["code"] = code
+            ses.last["code"] = code
+        return _finish(out, ses, text)
 
     if llm_available():          # a real model talks; Nova's tools do the work
         try:
@@ -2230,6 +2281,21 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                             f"{', '.join(able) or 'not much'} — say 'help' for "
                             f"examples.")
     return out
+
+def start_skill(app):
+    """Train your model in the background while the app serves. One thread,
+    lowest priority — the page stays responsive because numpy drops the GIL
+    during the matrix work."""
+    try:
+        st = SkillTrainer()
+    except Exception as e:
+        print(f"skill training off: {type(e).__name__}")
+        return None
+    app._skill = st
+    milo_reply.skill = st
+    st.start()
+    return st
+
 
 def build_app(trainer):
     from flask import Flask, jsonify, render_template_string, request, send_file
@@ -3570,6 +3636,8 @@ if os.environ.get("SERVER_SOFTWARE", "").startswith("gunicorn"):
     if AUTOTRAIN:
         trainer.start()
     app = build_app(trainer)
+    if env("NOVA_TRAIN", "1") == "1":
+        start_skill(app)
 
 if __name__ == "__main__":
     cli()
