@@ -1518,15 +1518,20 @@ class SkillTrainer:
                 open(stamp, "w").write(key)
             except OSError:
                 pass
-        ids = ids.astype(np.int64) if ids.dtype != np.int64 else ids
+        # 28M ids as int64 is 223 MB; as uint16 it's 56 MB. Only the batch
+        # needs to be int64, and that's 1,536 numbers. This is what was
+        # killing the worker on a small host.
+        if ids.dtype != np.uint16:
+            ids = ids.astype(np.uint16)
         cut = int(0.97 * len(ids))
         self.train_ids, self.val_ids = ids[:cut], ids[cut:]
 
+        self.text = ""                 # 30 MB of source, no longer needed
         self.model = NanoGPT(vocab=len(self.tok), block=BIG_BLOCK,
                              n_layer=BIG_LAYERS, n_head=BIG_HEADS,
                              n_embd=BIG_EMBD, seed=7)
         self.opt = Adam(self.model.p, lr=env("NOVA_LR", 8e-4, float))
-        self.batch = env("NOVA_BATCH", 12, int)
+        self.batch = env("NOVA_BATCH", 8, int)
         self.rng = np.random.default_rng()
         self._stop = threading.Event()
         self.thread = None
@@ -1605,8 +1610,9 @@ class SkillTrainer:
     # --- training -----------------------------------------------------
     def _batch(self, split):
         ix = self.rng.integers(0, len(split) - BIG_BLOCK - 1, self.batch)
-        return (np.stack([split[i:i + BIG_BLOCK] for i in ix]),
-                np.stack([split[i + 1:i + 1 + BIG_BLOCK] for i in ix]))
+        x = np.stack([split[i:i + BIG_BLOCK] for i in ix]).astype(np.int64)
+        y = np.stack([split[i + 1:i + 1 + BIG_BLOCK] for i in ix]).astype(np.int64)
+        return x, y
 
     def step_once(self):
         x, y = self._batch(self.train_ids)
@@ -2324,12 +2330,45 @@ def milo_reply(text, trainer, model=DEFAULT_MODEL, session=None):
                             f"examples.")
     return out
 
+def free_memory_mb():
+    """How much RAM is actually available, so we don't kill the worker."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    try:                                   # macOS has no /proc
+        import subprocess
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True, timeout=2)
+        return int(out.stdout.strip()) / 1e6 * 0.5
+    except Exception:
+        return 4096.0                      # assume a normal machine
+
+
 def start_skill(app):
     """Train your model in the background while the app serves. One thread,
     lowest priority — the page stays responsive because numpy drops the GIL
     during the matrix work."""
+    # Measured: ~900 MB peak at batch 4, ~1.15 GB at batch 8, for the 15M
+    # model. The backward pass holds every layer's activations at once, which
+    # is most of it. 2 GB free is a safe bar.
+    need = env("NOVA_NEED_MB", 2000, int)
+    free = free_memory_mb()
+    if free < need and env("NOVA_TRAIN", "auto") != "force":
+        app._skill_note = (f"training off: needs about {need} MB free and this "
+                           f"machine has {free:.0f} MB. Run it on your Mac, or "
+                           f"set NOVA_TRAIN=force to try anyway.")
+        print(app._skill_note)
+        return None
     try:
         st = SkillTrainer()
+    except MemoryError:
+        app._skill_note = "training off: ran out of memory building the corpus."
+        print(app._skill_note)
+        return None
     except Exception as e:
         print(f"skill training off: {type(e).__name__}")
         return None
@@ -2418,7 +2457,9 @@ def build_app(trainer):
         st = getattr(app, "_skill", None)
         if st is None:
             return jsonify(running=False,
-                           hint="start it with: python nova.py train-skill")
+                           hint=getattr(app, "_skill_note",
+                                        "start it with: python nova.py "
+                                        "train-skill"))
         d = dict(st.state)
         d["running"] = bool(st.thread and st.thread.is_alive())
         return jsonify(d)
@@ -3678,7 +3719,7 @@ if os.environ.get("SERVER_SOFTWARE", "").startswith("gunicorn"):
     if AUTOTRAIN:
         trainer.start()
     app = build_app(trainer)
-    if env("NOVA_TRAIN", "1") == "1":
+    if env("NOVA_TRAIN", "auto") != "off":
         start_skill(app)
 
 if __name__ == "__main__":
