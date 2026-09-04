@@ -1432,29 +1432,51 @@ def chat_corpus(n=env("NOVA_CHATS", 9000, int), seed=0):
     return "\n\n".join(out)
 
 
-def code_corpus(paths=None, limit_mb=env("NOVA_CODE_MB", 14, int)):
-    """Real Python off your disk. The standard library by default; add your
-    own projects with NOVA_CODE=/path/one:/path/two — your code is the best
-    data here, since it's what you actually want it to sound like."""
+def code_corpus(paths=None, limit_mb=env("NOVA_CODE_MB", 30, int)):
+    """Real Python off your disk: the standard library, everything pip has
+    installed, and any folders you name in NOVA_CODE. Installed packages are
+    the big win — 95 MB of other people's well-written code is already sitting
+    on the machine, free and local.
+
+    Your own projects are better still, because it learns to sound like you:
+        NOVA_CODE=~/chess-engine:~/projects python nova.py serve
+    """
+    import site
     import sysconfig
-    roots = paths or env("NOVA_CODE",
-                         sysconfig.get_paths()["stdlib"]).split(":")
+    roots = paths
+    if roots is None:
+        roots = env("NOVA_CODE", "").split(":") if env("NOVA_CODE", "") else []
+        roots.append(sysconfig.get_paths()["stdlib"])
+        if env("NOVA_PACKAGES", "1") == "1":
+            try:
+                roots += [p for p in site.getsitepackages() if os.path.isdir(p)]
+            except Exception:
+                pass
+            for extra in ("/usr/local/lib/python3.12/dist-packages",
+                          sysconfig.get_paths().get("purelib", "")):
+                if extra and os.path.isdir(extra) and extra not in roots:
+                    roots.append(extra)
     chunks, total = [], 0
     for root in roots:
         root = os.path.expanduser(root)
+        if not os.path.isdir(root):
+            continue
         for folder, dirs, names in os.walk(root):
             dirs[:] = [d for d in dirs if d not in
-                       ("test", "tests", "__pycache__", "idlelib", "site-packages")]
+                       ("test", "tests", "__pycache__", "idlelib", ".git",
+                        "node_modules")]
             for name in sorted(names):
-                if not name.endswith(".py"):
+                if not name.endswith((".py", ".md", ".rst")):
                     continue
                 path = os.path.join(folder, name)
                 try:
-                    if os.path.getsize(path) > 120_000:
+                    if os.path.getsize(path) > 150_000:
                         continue
                     with open(path, encoding="utf-8", errors="ignore") as f:
                         text = f.read()
                 except OSError:
+                    continue
+                if len(text) < 200:
                     continue
                 chunks.append(text)
                 total += len(text)
@@ -1479,7 +1501,24 @@ class SkillTrainer:
             self.tok = BPE(vocab_size=BIG_VOCAB).train(self.text[:400_000])
             self.tok.save(SKILL_VOCAB)
 
-        ids = np.array(self.tok.encode(self.text), dtype=np.int64)
+        cache = os.path.join(DATA_DIR, "skill_ids.npy")
+        stamp = os.path.join(DATA_DIR, "skill_ids.txt")
+        key = f"{len(self.text)}:{len(self.tok)}"
+        ids = None
+        if os.path.exists(cache) and os.path.exists(stamp):
+            if open(stamp).read().strip() == key:      # same corpus as before
+                try:
+                    ids = np.load(cache)
+                except Exception:
+                    ids = None
+        if ids is None:
+            ids = np.array(self.tok.encode(self.text), dtype=np.uint16)
+            try:
+                np.save(cache, ids)
+                open(stamp, "w").write(key)
+            except OSError:
+                pass
+        ids = ids.astype(np.int64) if ids.dtype != np.int64 else ids
         cut = int(0.97 * len(ids))
         self.train_ids, self.val_ids = ids[:cut], ids[cut:]
 
@@ -1494,7 +1533,10 @@ class SkillTrainer:
         # One "pass" is the model seeing the whole corpus once. Three passes
         # is a sensible target: enough to learn, not so much it memorises.
         per_step = self.batch * BIG_BLOCK
-        self.passes = env("NOVA_PASSES", 3, int)
+        # With 3+ tokens per parameter one pass is enough; repeating a big
+        # corpus mostly teaches it to memorise. Small corpus, more passes.
+        self.passes = env("NOVA_PASSES", 0, int) or (
+            1 if len(ids) > 20_000_000 else 3)
         self.target = env("NOVA_TARGET", 0, int) or max(
             1000, int(self.passes * len(ids) / per_step))
         self.state = {"step": 0, "loss": None, "val": None, "best": None,
